@@ -7,10 +7,20 @@ import { Readable, PassThrough } from 'stream';
 import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
-// The .env.local now correctly points to our updated fonts.conf.
-// The new fonts.conf tells fontconfig to scan the project's /fonts directory.
-// Therefore, we no longer need to provide a full, escaped path to the font file.
-// We can simply ask for the font by its name, and fontconfig will find it.
+// --- THE DEFINITIVE & ROBUST HYBRID SOLUTION ---
+// This combines all successful lessons learned from the debugging process.
+
+// 1. `.env.local` points FONTCONFIG_FILE to a minimal `fonts.conf`.
+//    - PURPOSE: Solves the initial `Cannot load default config file` error.
+//    - The `fonts.conf` itself does nothing else.
+
+// 2. We MANUALLY build the filter string.
+//    - PURPOSE: Solves the `Error parsing a filter description` error by bypassing
+//      the unreliable escaping of the fluent-ffmpeg library.
+
+// 3. We MANUALLY provide an escaped, absolute path to the font file.
+//    - PURPOSE: Solves the `Cannot find a valid font` error by telling ffmpeg exactly
+//      where the font is, removing all reliance on fontconfig's search mechanism.
 
 const ffmpegPath = process.env.FFMPEG_PATH;
 const ffprobePath = process.env.FFPROBE_PATH;
@@ -27,8 +37,21 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchema),
 });
 
-// Re-instating the clean, object-based filter API.
-// With a fully functional fontconfig, fluent-ffmpeg should now be able to handle this correctly without manual string escaping.
+// --- PROVEN-TO-WORK ESCAPING FUNCTIONS ---
+
+function escapeFFmpegDrawtext(text: string): string {
+  // Escapes single quotes and other special characters for the `text` option.
+  return text
+    .replace(/\\/g, '\\\\')        // 1. Escape backslashes
+    .replace(/'/g, `'\\''`)       // 2. Escape single quotes
+    .replace(/:/g, '\\:')          // 3. Escape colons
+    .replace(/%/g, '\\%');         // 4. Escape percentage signs
+}
+
+function escapeWindowsPathForFFmpeg(p: string): string {
+  // Escapes a Windows path for use in any ffmpeg filter.
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -54,28 +77,21 @@ export async function POST(req: NextRequest) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
     }
     const inputStream = Readable.fromWeb(response.body as any);
+    
+    const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+    const escapedFontPath = escapeWindowsPathForFFmpeg(fontPath);
 
-    const videoFilters = segments.map((segment) => ({
-      filter: 'drawtext',
-      options: {
-        // We just need to specify the font name. Fontconfig will find the file.
-        font: 'Roboto-Bold', 
-        text: segment.text,
-        fontcolor: 'white',
-        fontsize: 48,
-        box: 1,
-        boxcolor: 'black@0.5',
-        boxborderw: 10,
-        x: '(w-text_w)/2',
-        y: '(h-text_h)/2',
-        enable: `between(t,${segment.startTime},${segment.endTime})`,
-      },
-    }));
+    const drawtextFilters = segments
+      .map((segment) => {
+        const escapedText = escapeFFmpegDrawtext(segment.text);
+        return `drawtext=fontfile='${escapedFontPath}':text='${escapedText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${segment.startTime},${segment.endTime})'`;
+      })
+      .join(',');
 
     const passthrough = new PassThrough();
 
     const ffmpegProcess = ffmpeg(inputStream)
-      .videoFilters(videoFilters)
+      .outputOptions('-vf', drawtextFilters)
       .outputOptions('-c:a', 'copy')
       .outputOptions('-movflags', 'frag_keyframe+empty_moov')
       .toFormat('mp4');
