@@ -3,9 +3,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
@@ -24,18 +23,14 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchema),
 });
 
-// Helper to escape text for ffmpeg's drawtext filter on all platforms
 function escapeFFmpegText(text: string): string {
   return text
     .replace(/\\/g, '\\\\\\\\')
     .replace(/:/g, '\\\\:')
     .replace(/%/g, '\\\\%')
-    // Most importantly, escape single quotes
     .replace(/'/g, `\\\\\\\\\\\'`);
 }
 
-// Helper to escape a Windows path for the drawtext filter
-// e.g., C:\Users\user\font.ttf -> C\\:/Users/user/font.ttf
 function escapeWindowsPathForFFmpeg(p: string): string {
   return p.replace(/\\/g, '/').replace(/:/g, '\\:');
 }
@@ -51,12 +46,15 @@ export async function POST(req: NextRequest) {
       );
     }
     const { mediaUrl, segments } = validation.data;
-    
+
     if (!ffmpegPath || !ffprobePath) {
-       return NextResponse.json({
-        error:
-          'FFMPEG/FFPROBE paths not configured on server. Please set FFMPEG_PATH and FFPROBE_PATH environment variables.',
-      }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:
+            'FFMPEG/FFPROBE paths not configured on server. Please set FFMPEG_PATH and FFPROBE_PATH environment variables.',
+        },
+        { status: 500 }
+      );
     }
 
     const response = await fetch(mediaUrl);
@@ -64,15 +62,6 @@ export async function POST(req: NextRequest) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
     }
     const inputStream = Readable.fromWeb(response.body as any);
-    const tempInputPath = path.join(os.tmpdir(), `aivos-input-${Date.now()}`);
-    const tempOutputPath = path.join(os.tmpdir(), `aivos-output-${Date.now()}.mp4`);
-    
-    await new Promise((resolve, reject) => {
-        const writer = fs.createWriteStream(tempInputPath);
-        inputStream.pipe(writer);
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-    });
 
     const fontFileName = 'Roboto-Bold.ttf';
     let fontPath = path.join(process.cwd(), 'fonts', fontFileName);
@@ -81,58 +70,46 @@ export async function POST(req: NextRequest) {
       fontPath = escapeWindowsPathForFFmpeg(fontPath);
     }
 
-    const drawtextFilters = segments.map((segment) => {
-      const text = escapeFFmpegText(segment.text);
-      const { startTime, endTime } = segment;
-      return `drawtext=fontfile='${fontPath}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
-    }).join(',');
+    const drawtextFilters = segments
+      .map((segment) => {
+        const text = escapeFFmpegText(segment.text);
+        const { startTime, endTime } = segment;
+        return `drawtext=fontfile='${fontPath}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
+      })
+      .join(',');
 
-    // FIX: Set FONTCONFIG_FILE env var on Windows to prevent fontconfig error
-    const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
+    const fontConfigPath = path.join(
+      process.cwd(),
+      'src',
+      'app',
+      'api',
+      'render-video',
+      'fonts.conf'
+    );
     if (process.platform === 'win32') {
       process.env.FONTCONFIG_FILE = fontConfigPath;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(tempInputPath)
-        .videoFilters(drawtextFilters)
-        .outputOptions('-c:a', 'copy')
-        .toFormat('mp4')
-        .on('error', (err) => {
-            console.error('ffmpeg error:', err.message);
-            reject(new Error(`ffmpeg failed: ${err.message}`));
-        })
-        .on('end', () => {
-            resolve();
-        })
-        .save(tempOutputPath);
+    const passthrough = new PassThrough();
+
+    const ffmpegProcess = ffmpeg(inputStream)
+      .videoFilters(drawtextFilters)
+      .outputOptions('-c:a', 'copy')
+      .outputOptions('-movflags', 'frag_keyframe+empty_moov')
+      .toFormat('mp4');
+
+    ffmpegProcess.on('error', (err, stdout, stderr) => {
+      console.error('ffmpeg process error:', err.message);
+      console.error('ffmpeg stderr:', stderr);
+      passthrough.destroy(new Error(`ffmpeg failed: ${err.message}`));
     });
 
-    const stats = await fs.promises.stat(tempOutputPath);
-    const videoStream = fs.createReadStream(tempOutputPath);
+    ffmpegProcess.pipe(passthrough, { end: true });
 
     const headers = new Headers();
     headers.set('Content-Type', 'video/mp4');
-    headers.set('Content-Length', stats.size.toString());
 
-    const responseStream = new ReadableStream({
-      start(controller) {
-        videoStream.on('data', (chunk) => controller.enqueue(chunk));
-        videoStream.on('end', () => {
-          controller.close();
-          fs.promises.unlink(tempInputPath).catch(e => console.error("Failed to clean up input file:", e));
-          fs.promises.unlink(tempOutputPath).catch(e => console.error("Failed to clean up output file:", e));
-        });
-        videoStream.on('error', (err) => {
-          controller.error(err);
-          fs.promises.unlink(tempInputPath).catch(e => console.error("Failed to clean up input file:", e));
-          fs.promises.unlink(tempOutputPath).catch(e => console.error("Failed to clean up output file:", e));
-        });
-      },
-    });
-
-    return new NextResponse(responseStream, { headers });
-
+    return new NextResponse(passthrough as any, { headers });
   } catch (error: any) {
     console.error('Server-side render failed:', error);
     return NextResponse.json(
