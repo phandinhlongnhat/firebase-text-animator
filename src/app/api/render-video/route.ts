@@ -22,6 +22,30 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchema),
 });
 
+// THE DEFINITIVE SOLUTION: Based on the final error logs, two separate escaping issues were identified
+// that the fluent-ffmpeg library did not handle automatically. We must handle them manually.
+
+/**
+ * Escapes text content for the ffmpeg drawtext filter.
+ * Crucially, it handles single quotes within the text, which would otherwise break the filter syntax.
+ * Example: "it's" becomes "it'\\''s"
+ */
+function escapeFFmpegDrawtext(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\') // 1. Escape backslashes
+    .replace(/'/g, `'\\''`) // 2. Escape single quotes
+    .replace(/:/g, '\\:');     // 3. Escape colons
+}
+
+/**
+ * Escapes a Windows file path for the ffmpeg drawtext filter.
+ * The filter requires a very specific format.
+ * Example: "C:\Users\font.ttf" becomes "C\\:/Users/font.ttf"
+ */
+function escapeWindowsPathForDrawtext(p: string): string {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -41,58 +65,48 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // FINAL SOLUTION (Re-instated): The root cause was identified as a fontconfig initialization error on Windows.
-    // By providing a minimal, valid fonts.conf file and pointing the FONTCONFIG_FILE environment variable to it,
-    // we allow ffmpeg's font handling system to initialize correctly. With that fixed, it can now access the font file specified by its path.
-    if (process.platform === 'win32') {
-        const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
-        process.env.FONTCONFIG_FILE = fontConfigPath;
-    }
-
     const response = await fetch(mediaUrl);
     if (!response.ok || !response.body) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
     }
     const inputStream = Readable.fromWeb(response.body as any);
 
-    const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+    let fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+    if (process.platform === 'win32') {
+      fontPath = escapeWindowsPathForDrawtext(fontPath);
+    }
 
-    const videoFilters = segments.map((segment) => ({
-      filter: 'drawtext',
-      options: {
-        fontfile: fontPath,
-        text: segment.text,
-        fontcolor: 'white',
-        fontsize: 48,
-        box: 1,
-        boxcolor: 'black@0.5',
-        boxborderw: 10,
-        x: '(w-text_w)/2',
-        y: '(h-text_h)/2',
-        enable: `between(t,${segment.startTime},${segment.endTime})`,
-      },
-    }));
+    // Manually construct the filter string with our robust escaping functions
+    const drawtextFilters = segments
+      .map((segment) => {
+        const escapedText = escapeFFmpegDrawtext(segment.text);
+        const { startTime, endTime } = segment;
+        return `drawtext=fontfile='${fontPath}':text='${escapedText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
+      })
+      .join(',');
 
     const passthrough = new PassThrough();
 
     const ffmpegProcess = ffmpeg(inputStream)
-      .videoFilters(videoFilters)
+      // Use .outputOptions('-vf', ...) to pass the raw, correctly escaped filter string.
+      // This bypasses the faulty automatic escaping in .videoFilters().
+      .outputOptions('-vf', drawtextFilters)
       .outputOptions('-c:a', 'copy')
       .outputOptions('-movflags', 'frag_keyframe+empty_moov')
       .toFormat('mp4');
 
     ffmpegProcess.on('start', (commandLine) => {
-        console.log('Spawned Ffmpeg with command: ' + commandLine);
+      console.log('Spawned Ffmpeg with command: ' + commandLine);
     });
-    
+
     ffmpegProcess.on('error', (err, stdout, stderr) => {
       console.error('ffmpeg process error:', err.message);
       console.error('ffmpeg stderr:', stderr);
       passthrough.destroy(new Error(`ffmpeg failed: ${err.message}`));
     });
-    
+
     ffmpegProcess.on('end', () => {
-        console.log('ffmpeg process finished successfully.');
+      console.log('ffmpeg process finished successfully.');
     });
 
     ffmpegProcess.pipe(passthrough, { end: true });
