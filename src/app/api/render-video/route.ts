@@ -2,10 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import ffmpeg from 'fluent-ffmpeg';
-import fs from 'fs';
-import path from 'path';
 import { Readable, PassThrough } from 'stream';
-import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
 const ffmpegPath = process.env.FFMPEG_PATH;
@@ -20,25 +17,9 @@ if (ffprobePath) {
 
 const RequestBodySchema = z.object({
   mediaUrl: z.string().url(),
-  segments: z.array(AnimationSegmentSchema),
+  // Segments are not used in this diagnostic version
+  // segments: z.array(z.any()), 
 });
-
-function escapeFFmpegText(text: string): string {
-  // Escape characters that are special to ffmpeg's filter syntax.
-  // The filter's `text` parameter is wrapped in single quotes, e.g., text='your text here'.
-  // Therefore, any literal single quotes within the text must be escaped.
-  // The escape sequence for a single quote inside an ffmpeg quoted string is '\''.
-  // To produce this literal string in JavaScript, we need to escape the backslash.
-  return text
-    .replace(/\\/g, '\\\\')      // 1. First, escape the escape character itself.
-    .replace(/'/g, `\\'`)       // 2. Escape single quotes to prevent breaking the filter syntax.
-    .replace(/:/g, '\\:')        // 3. Escape colons.
-    .replace(/%/g, '\\%');       // 4. Escape percent signs.
-}
-
-function escapeWindowsPathForFFmpeg(p: string): string {
-  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -50,14 +31,11 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { mediaUrl, segments } = validation.data;
+    const { mediaUrl } = validation.data;
 
     if (!ffmpegPath || !ffprobePath) {
       return NextResponse.json(
-        {
-          error:
-            'FFMPEG/FFPROBE paths not configured on server. Please set FFMPEG_PATH and FFPROBE_PATH environment variables.',
-        },
+        { error: 'FFMPEG/FFPROBE paths not configured.' },
         { status: 500 }
       );
     }
@@ -68,45 +46,33 @@ export async function POST(req: NextRequest) {
     }
     const inputStream = Readable.fromWeb(response.body as any);
 
-    const fontFileName = 'Roboto-Bold.ttf';
-    let fontPath = path.join(process.cwd(), 'fonts', fontFileName);
-
-    if (process.platform === 'win32') {
-      fontPath = escapeWindowsPathForFFmpeg(fontPath);
-    }
-
-    const drawtextFilters = segments
-      .map((segment) => {
-        const text = escapeFFmpegText(segment.text);
-        const { startTime, endTime } = segment;
-        return `drawtext=fontfile='${fontPath}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
-      })
-      .join(',');
-
-    const fontConfigPath = path.join(
-      process.cwd(),
-      'src',
-      'app',
-      'api',
-      'render-video',
-      'fonts.conf'
-    );
-    if (process.platform === 'win32') {
-      process.env.FONTCONFIG_FILE = fontConfigPath;
-    }
+    // DIAGNOSTIC STEP: Use a simple, self-contained filter (hue=s=0 for black & white)
+    // This removes the font file dependency to isolate the problem.
+    const videoFilters = [{
+      filter: 'hue',
+      options: { s: 0 },
+    }];
 
     const passthrough = new PassThrough();
 
     const ffmpegProcess = ffmpeg(inputStream)
-      .videoFilters(drawtextFilters)
+      .videoFilters(videoFilters)
       .outputOptions('-c:a', 'copy')
       .outputOptions('-movflags', 'frag_keyframe+empty_moov')
       .toFormat('mp4');
 
+    ffmpegProcess.on('start', (commandLine) => {
+        console.log('Spawned Ffmpeg with command: ' + commandLine);
+    });
+    
     ffmpegProcess.on('error', (err, stdout, stderr) => {
       console.error('ffmpeg process error:', err.message);
       console.error('ffmpeg stderr:', stderr);
       passthrough.destroy(new Error(`ffmpeg failed: ${err.message}`));
+    });
+    
+    ffmpegProcess.on('end', () => {
+        console.log('ffmpeg process finished successfully.');
     });
 
     ffmpegProcess.pipe(passthrough, { end: true });
@@ -118,7 +84,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error('Server-side render failed:', error);
     return NextResponse.json(
-      { error: error.message || 'An unknown error occurred during rendering.' },
+      { error: error.message || 'An unknown error occurred.' },
       { status: 500 }
     );
   }
