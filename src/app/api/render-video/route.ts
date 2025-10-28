@@ -2,7 +2,9 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import ffmpeg from 'fluent-ffmpeg';
+import path from 'path';
 import { Readable, PassThrough } from 'stream';
+import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
 const ffmpegPath = process.env.FFMPEG_PATH;
@@ -17,8 +19,7 @@ if (ffprobePath) {
 
 const RequestBodySchema = z.object({
   mediaUrl: z.string().url(),
-  // Segments are not used in this diagnostic version
-  // segments: z.array(z.any()), 
+  segments: z.array(AnimationSegmentSchema),
 });
 
 export async function POST(req: NextRequest) {
@@ -31,7 +32,7 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { mediaUrl } = validation.data;
+    const { mediaUrl, segments } = validation.data;
 
     if (!ffmpegPath || !ffprobePath) {
       return NextResponse.json(
@@ -40,18 +41,37 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // FINAL SOLUTION (Re-instated): The root cause was identified as a fontconfig initialization error on Windows.
+    // By providing a minimal, valid fonts.conf file and pointing the FONTCONFIG_FILE environment variable to it,
+    // we allow ffmpeg's font handling system to initialize correctly. With that fixed, it can now access the font file specified by its path.
+    if (process.platform === 'win32') {
+        const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
+        process.env.FONTCONFIG_FILE = fontConfigPath;
+    }
+
     const response = await fetch(mediaUrl);
     if (!response.ok || !response.body) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
     }
     const inputStream = Readable.fromWeb(response.body as any);
 
-    // DIAGNOSTIC STEP: Use a simple, self-contained filter (hue=s=0 for black & white)
-    // This removes the font file dependency to isolate the problem.
-    const videoFilters = [{
-      filter: 'hue',
-      options: { s: 0 },
-    }];
+    const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+
+    const videoFilters = segments.map((segment) => ({
+      filter: 'drawtext',
+      options: {
+        fontfile: fontPath,
+        text: segment.text,
+        fontcolor: 'white',
+        fontsize: 48,
+        box: 1,
+        boxcolor: 'black@0.5',
+        boxborderw: 10,
+        x: '(w-text_w)/2',
+        y: '(h-text_h)/2',
+        enable: `between(t,${segment.startTime},${segment.endTime})`,
+      },
+    }));
 
     const passthrough = new PassThrough();
 
