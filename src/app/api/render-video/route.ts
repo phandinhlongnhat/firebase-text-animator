@@ -71,17 +71,28 @@ export async function POST(req: NextRequest) {
         writer.on('error', reject);
     });
 
+    // The font file is now in the root `fonts` directory.
+    // We just need to reference it by name.
+    const fontFileName = 'Roboto-Bold.ttf';
+
+
     // 3. Generate complex filtergraph for ffmpeg
     const drawtextFilters = segments.map((segment) => {
       const text = escapeFFmpegText(segment.text);
       const { startTime, endTime } = segment;
       // TODO: Add more complex animation logic here based on segment.animations
-      return `drawtext=fontfile=/system/fonts/Roboto-Bold.ttf:text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
+      return `drawtext=fontfile='${fontFileName}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
     }).join(',');
 
     // 4. Run ffmpeg command
     await new Promise<void>((resolve, reject) => {
-      ffmpeg(tempInputPath)
+      const command = ffmpeg(tempInputPath);
+      
+      // Set the FONTCONFIG_PATH environment variable to the project's root directory.
+      // This tells fontconfig (used by drawtext) where to look for the `fonts` folder.
+      command.addOption('-fontconfig_path', process.cwd());
+
+      command
         .videoFilters(drawtextFilters)
         .outputOptions('-c:a', 'copy') // Copy audio stream without re-encoding
         .toFormat('mp4')
