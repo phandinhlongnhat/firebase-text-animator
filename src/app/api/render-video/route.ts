@@ -28,9 +28,10 @@ const RequestBodySchema = z.object({
 function escapeFFmpegText(text: string): string {
   return text
     .replace(/\\/g, '\\\\\\\\')
-    .replace(/'/g, `\\\\\\\\\\\'`)
     .replace(/:/g, '\\\\:')
-    .replace(/%/g, '\\\\%');
+    .replace(/%/g, '\\\\%')
+    // Most importantly, escape single quotes
+    .replace(/'/g, `\\\\\\\\\\\'`);
 }
 
 // Helper to escape a Windows path for the drawtext filter
@@ -76,7 +77,6 @@ export async function POST(req: NextRequest) {
     const fontFileName = 'Roboto-Bold.ttf';
     let fontPath = path.join(process.cwd(), 'fonts', fontFileName);
 
-    // If on Windows, apply the special path escaping
     if (process.platform === 'win32') {
       fontPath = escapeWindowsPathForFFmpeg(fontPath);
     }
@@ -84,9 +84,14 @@ export async function POST(req: NextRequest) {
     const drawtextFilters = segments.map((segment) => {
       const text = escapeFFmpegText(segment.text);
       const { startTime, endTime } = segment;
-      // TODO: Add more complex animation logic here
       return `drawtext=fontfile='${fontPath}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
     }).join(',');
+
+    // FIX: Set FONTCONFIG_FILE env var on Windows to prevent fontconfig error
+    const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
+    if (process.platform === 'win32') {
+      process.env.FONTCONFIG_FILE = fontConfigPath;
+    }
 
     await new Promise<void>((resolve, reject) => {
       ffmpeg(tempInputPath)
