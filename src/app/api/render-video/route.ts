@@ -7,9 +7,10 @@ import { Readable, PassThrough } from 'stream';
 import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
-// The FONTCONFIG_FILE environment variable is now correctly set via .env.local before the app starts.
-// This ensures ffmpeg's font system initializes correctly.
-// We can now remove all manual environment variable logic from the code.
+// The .env.local file correctly sets FONTCONFIG_FILE, solving the initialization issue.
+// However, the previous step proved that fluent-ffmpeg's .videoFilters() API cannot be trusted
+// to escape Windows paths and special text characters correctly. 
+// THEREFORE, we must revert to the robust manual string construction method.
 
 const ffmpegPath = process.env.FFMPEG_PATH;
 const ffprobePath = process.env.FFPROBE_PATH;
@@ -25,6 +26,20 @@ const RequestBodySchema = z.object({
   mediaUrl: z.string().url(),
   segments: z.array(AnimationSegmentSchema),
 });
+
+// --- ROBUST ESCAPING FUNCTIONS (RE-IMPLEMENTED) ---
+// These are essential to manually build a syntactically correct filter string.
+
+function escapeFFmpegDrawtext(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, `'\\''`)
+    .replace(/:/g, '\\:');
+}
+
+function escapeWindowsPathForDrawtext(p: string): string {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -51,30 +66,27 @@ export async function POST(req: NextRequest) {
     }
     const inputStream = Readable.fromWeb(response.body as any);
 
-    // With the fontconfig issue resolved, we can revert to the clean, object-based filter API.
-    // fluent-ffmpeg will handle the necessary path and character escaping.
-    const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+    let fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
+    // Manually escape the path for Windows, as the library fails to do so.
+    if (process.platform === 'win32') {
+      fontPath = escapeWindowsPathForDrawtext(fontPath);
+    }
 
-    const videoFilters = segments.map((segment) => ({
-      filter: 'drawtext',
-      options: {
-        fontfile: fontPath,
-        text: segment.text, // The library will now correctly handle special characters like single quotes.
-        fontcolor: 'white',
-        fontsize: 48,
-        box: 1,
-        boxcolor: 'black@0.5',
-        boxborderw: 10,
-        x: '(w-text_w)/2',
-        y: '(h-text_h)/2',
-        enable: `between(t,${segment.startTime},${segment.endTime})`,
-      },
-    }));
+    // Manually construct the filter string with our robust escaping functions.
+    const drawtextFilters = segments
+      .map((segment) => {
+        const escapedText = escapeFFmpegDrawtext(segment.text);
+        const { startTime, endTime } = segment;
+        return `drawtext=fontfile='${fontPath}':text='${escapedText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
+      })
+      .join(',');
 
     const passthrough = new PassThrough();
 
     const ffmpegProcess = ffmpeg(inputStream)
-      .videoFilters(videoFilters) // Using the robust, idiomatic API.
+      // Use .outputOptions('-vf', ...) to pass the raw, correctly escaped filter string.
+      // This bypasses the faulty automatic escaping in .videoFilters().
+      .outputOptions('-vf', drawtextFilters)
       .outputOptions('-c:a', 'copy')
       .outputOptions('-movflags', 'frag_keyframe+empty_moov')
       .toFormat('mp4');
