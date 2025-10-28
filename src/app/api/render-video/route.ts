@@ -24,11 +24,16 @@ const RequestBodySchema = z.object({
 });
 
 function escapeFFmpegText(text: string): string {
+  // Escape characters that are special to ffmpeg's filter syntax.
+  // The filter's `text` parameter is wrapped in single quotes, e.g., text='your text here'.
+  // Therefore, any literal single quotes within the text must be escaped.
+  // The escape sequence for a single quote inside an ffmpeg quoted string is '\''.
+  // To produce this literal string in JavaScript, we need to escape the backslash.
   return text
-    .replace(/\\/g, '\\\\\\\\')
-    .replace(/:/g, '\\\\:')
-    .replace(/%/g, '\\\\%')
-    .replace(/'/g, `\\\\\\\\\\\'`);
+    .replace(/\\/g, '\\\\')      // 1. First, escape the escape character itself.
+    .replace(/'/g, `\\'`)       // 2. Escape single quotes to prevent breaking the filter syntax.
+    .replace(/:/g, '\\:')        // 3. Escape colons.
+    .replace(/%/g, '\\%');       // 4. Escape percent signs.
 }
 
 function escapeWindowsPathForFFmpeg(p: string): string {
