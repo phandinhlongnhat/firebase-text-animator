@@ -7,6 +7,22 @@ import { Readable, PassThrough } from 'stream';
 import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
+// --- STRATEGIC INITIALIZATION (THE FINAL FIX) ---
+// The root cause was a Fontconfig error on Windows, because ffmpeg couldn't find a default config file.
+// The fix is to set the FONTCONFIG_FILE environment variable to point to a minimal, valid config file.
+// CRUCIALLY, this must be done at the MODULE LEVEL (outside the handler) so it's set before
+// fluent-ffmpeg initializes itself when the server starts. Setting it inside the handler is too late.
+if (process.platform === 'win32') {
+    const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
+    // This check is for safety, though we create the file in our process.
+    try {
+        require('fs').accessSync(fontConfigPath);
+        process.env.FONTCONFIG_FILE = fontConfigPath;
+    } catch (error) {
+        console.error('CRITICAL: fonts.conf file not found. FFmpeg will likely fail.', error);
+    }
+}
+
 const ffmpegPath = process.env.FFMPEG_PATH;
 const ffprobePath = process.env.FFPROBE_PATH;
 
@@ -22,26 +38,17 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchema),
 });
 
-// THE DEFINITIVE SOLUTION: Based on the final error logs, two separate escaping issues were identified
-// that the fluent-ffmpeg library did not handle automatically. We must handle them manually.
+// --- ROBUST ESCAPING FUNCTIONS ---
+// These functions were developed through previous debugging steps and are essential for manually building
+// a syntactically correct filter string on Windows, handling both file paths and text content with special characters.
 
-/**
- * Escapes text content for the ffmpeg drawtext filter.
- * Crucially, it handles single quotes within the text, which would otherwise break the filter syntax.
- * Example: "it's" becomes "it'\\''s"
- */
 function escapeFFmpegDrawtext(text: string): string {
   return text
-    .replace(/\\/g, '\\\\') // 1. Escape backslashes
-    .replace(/'/g, `'\\''`) // 2. Escape single quotes
-    .replace(/:/g, '\\:');     // 3. Escape colons
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, `'\\''`)
+    .replace(/:/g, '\\:');
 }
 
-/**
- * Escapes a Windows file path for the ffmpeg drawtext filter.
- * The filter requires a very specific format.
- * Example: "C:\Users\font.ttf" becomes "C\\:/Users/font.ttf"
- */
 function escapeWindowsPathForDrawtext(p: string): string {
   return p.replace(/\\/g, '/').replace(/:/g, '\\:');
 }
@@ -76,7 +83,6 @@ export async function POST(req: NextRequest) {
       fontPath = escapeWindowsPathForDrawtext(fontPath);
     }
 
-    // Manually construct the filter string with our robust escaping functions
     const drawtextFilters = segments
       .map((segment) => {
         const escapedText = escapeFFmpegDrawtext(segment.text);
@@ -88,8 +94,6 @@ export async function POST(req: NextRequest) {
     const passthrough = new PassThrough();
 
     const ffmpegProcess = ffmpeg(inputStream)
-      // Use .outputOptions('-vf', ...) to pass the raw, correctly escaped filter string.
-      // This bypasses the faulty automatic escaping in .videoFilters().
       .outputOptions('-vf', drawtextFilters)
       .outputOptions('-c:a', 'copy')
       .outputOptions('-movflags', 'frag_keyframe+empty_moov')
