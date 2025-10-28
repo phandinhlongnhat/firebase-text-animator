@@ -1,10 +1,5 @@
 'use server';
 
-import {
-  assignAnimationsBasedOnEmotion,
-  type AnalyzedTextSegment,
-} from '@/ai/flows/assign-animations-based-on-emotion';
-import { speechToTextWithTimestamps } from '@/ai/flows/speech-to-text-with-timestamps';
 import type { AnimationSegment } from './types';
 
 
@@ -51,8 +46,8 @@ function parseSrt(srtContent: string): AnimationSegment[] {
         startTime,
         endTime,
         text,
-        emotion: 'neutral',
-        animations: ['fadeIn'],
+        emotion: 'neutral', // Default emotion
+        animations: ['fadeIn'], // Default animation
       });
     }
   }
@@ -60,52 +55,6 @@ function parseSrt(srtContent: string): AnimationSegment[] {
   return segments;
 }
 
-function formatTimestamp(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-    .toString()
-    .padStart(2, '0');
-  const m = Math.floor((seconds % 3600) / 60)
-    .toString()
-    .padStart(2, '0');
-  const s = Math.floor(seconds % 60)
-    .toString()
-    .padStart(2, '0');
-  const ms = Math.round((seconds - Math.floor(seconds)) * 1000)
-    .toString()
-    .padStart(3, '0');
-  return `${h}:${m}:${s},${ms}`;
-}
-
-export async function generateSrtFromMediaAction(
-  mediaDataUri: string
-): Promise<{
-  data: string | null;
-  error: string | null;
-}> {
-  try {
-    const rawResult = await speechToTextWithTimestamps({ mediaDataUri });
-    let srtContent = '';
-    rawResult.forEach((segment, index) => {
-      srtContent += `${index + 1}\n`;
-      srtContent += `${formatTimestamp(
-        segment.startTime
-      )} --> ${formatTimestamp(segment.endTime)}\n`;
-      srtContent += `${segment.text}\n\n`;
-    });
-
-    if (!srtContent.trim()) {
-      return { data: '', error: 'No speech detected in the media file.' };
-    }
-
-    return { data: srtContent, error: null };
-  } catch (e: any) {
-    console.error(e);
-    return {
-      data: null,
-      error: 'Failed to generate timings from media. Please try again.',
-    };
-  }
-}
 
 export async function generateAnimationFromSrtAction(
   srt: string
@@ -122,23 +71,8 @@ export async function generateAnimationFromSrtAction(
       };
     }
     
-    const combinedText = srtSegments.map(s => s.text).join('\n');
-    const emotionResult: AnalyzedTextSegment[] = await assignAnimationsBasedOnEmotion({ text: combinedText });
-
-    const finalSegments = srtSegments.map(segment => {
-      const matchedEmotion = emotionResult.find(res => res.text.includes(segment.text) || segment.text.includes(res.text));
-      if (matchedEmotion) {
-        return {
-          ...segment,
-          emotion: matchedEmotion.emotion,
-          animations: matchedEmotion.animations as string[],
-        }
-      }
-      return segment;
-    });
-
-
-    return { data: finalSegments, error: null };
+    // Just return the parsed segments directly, without AI enrichment.
+    return { data: srtSegments, error: null };
   } catch (e) {
     console.error(e);
     return {
