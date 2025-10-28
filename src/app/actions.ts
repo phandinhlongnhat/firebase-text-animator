@@ -98,7 +98,7 @@ export async function generateSrtFromMediaAction(
     }
 
     return { data: srtContent, error: null };
-  } catch (e) {
+  } catch (e: any) {
     console.error(e);
     return {
       data: null,

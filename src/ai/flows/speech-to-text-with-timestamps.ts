@@ -44,10 +44,10 @@ const speechToTextWithTimestampsFlow = ai.defineFlow(
     name: 'speechToTextWithTimestampsFlow',
     inputSchema: SpeechToTextWithTimestampsInputSchema,
     outputSchema: SpeechToTextWithTimestampsOutputSchema,
+    model: 'googleai/gemini-1.5-pro',
   },
   async (input) => {
     const { output } = await ai.generate({
-      model: 'googleai/gemini-1.5-pro',
       prompt: `You are a highly accurate speech-to-text transcription service. Transcribe the audio from the following file and provide timestamps for each segment.
 
 IMPORTANT: Group transcribed words into natural segments based on pauses and sentence structure. Each segment should be a meaningful phrase or clause, roughly 1-2 lines of text in length (around 8-15 words). Avoid creating very short, choppy segments.

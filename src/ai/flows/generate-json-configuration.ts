@@ -48,7 +48,6 @@ const generateJsonConfigurationFlow = ai.defineFlow(
     name: 'generateJsonConfigurationFlow',
     inputSchema: GenerateJsonConfigurationInputSchema,
     outputSchema: GenerateJsonConfigurationOutputSchema,
-    model: 'googleai/gemini-1.5-flash',
   },
   async input => {
     const {output} = await prompt(input);

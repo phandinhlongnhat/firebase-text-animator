@@ -9,8 +9,6 @@ import { Readable } from 'stream';
 import { AnimationSegmentSchema } from '@/app/types';
 import { z } from 'zod';
 
-// Set ffmpeg and ffprobe paths from environment variables
-// This is more robust than using installer packages in a Next.js environment
 const ffmpegPath = process.env.FFMPEG_PATH;
 const ffprobePath = process.env.FFPROBE_PATH;
 
@@ -26,7 +24,7 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchema),
 });
 
-// Helper to escape text for ffmpeg's drawtext filter
+// Helper to escape text for ffmpeg's drawtext filter on all platforms
 function escapeFFmpegText(text: string): string {
   return text
     .replace(/\\/g, '\\\\\\\\')
@@ -35,9 +33,14 @@ function escapeFFmpegText(text: string): string {
     .replace(/%/g, '\\\\%');
 }
 
+// Helper to escape a Windows path for the drawtext filter
+// e.g., C:\Users\user\font.ttf -> C\\:/Users/user/font.ttf
+function escapeWindowsPathForFFmpeg(p: string): string {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // 1. Validate request body
     const body = await req.json();
     const validation = RequestBodySchema.safeParse(body);
     if (!validation.success) {
@@ -55,7 +58,6 @@ export async function POST(req: NextRequest) {
       }, { status: 500 });
     }
 
-    // 2. Download media file to a temporary location
     const response = await fetch(mediaUrl);
     if (!response.ok || !response.body) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
@@ -71,30 +73,25 @@ export async function POST(req: NextRequest) {
         writer.on('error', reject);
     });
 
-    // The font file is now in the root `fonts` directory.
-    // We just need to reference it by name.
     const fontFileName = 'Roboto-Bold.ttf';
+    let fontPath = path.join(process.cwd(), 'fonts', fontFileName);
 
+    // If on Windows, apply the special path escaping
+    if (process.platform === 'win32') {
+      fontPath = escapeWindowsPathForFFmpeg(fontPath);
+    }
 
-    // 3. Generate complex filtergraph for ffmpeg
     const drawtextFilters = segments.map((segment) => {
       const text = escapeFFmpegText(segment.text);
       const { startTime, endTime } = segment;
-      // TODO: Add more complex animation logic here based on segment.animations
-      return `drawtext=fontfile='${fontFileName}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
+      // TODO: Add more complex animation logic here
+      return `drawtext=fontfile='${fontPath}':text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${startTime},${endTime})'`;
     }).join(',');
 
-    // 4. Run ffmpeg command
     await new Promise<void>((resolve, reject) => {
-      const command = ffmpeg(tempInputPath);
-      
-      // Set the FONTCONFIG_PATH environment variable to the project's root directory.
-      // This tells fontconfig (used by drawtext) where to look for the `fonts` folder.
-      command.addOption('-fontconfig_path', process.cwd());
-
-      command
+      ffmpeg(tempInputPath)
         .videoFilters(drawtextFilters)
-        .outputOptions('-c:a', 'copy') // Copy audio stream without re-encoding
+        .outputOptions('-c:a', 'copy')
         .toFormat('mp4')
         .on('error', (err) => {
             console.error('ffmpeg error:', err.message);
@@ -106,7 +103,6 @@ export async function POST(req: NextRequest) {
         .save(tempOutputPath);
     });
 
-    // 5. Stream the result back to the client
     const stats = await fs.promises.stat(tempOutputPath);
     const videoStream = fs.createReadStream(tempOutputPath);
 
@@ -114,13 +110,11 @@ export async function POST(req: NextRequest) {
     headers.set('Content-Type', 'video/mp4');
     headers.set('Content-Length', stats.size.toString());
 
-    // Use a Web Stream for the response body
     const responseStream = new ReadableStream({
       start(controller) {
         videoStream.on('data', (chunk) => controller.enqueue(chunk));
         videoStream.on('end', () => {
           controller.close();
-          // 6. Cleanup temporary files
           fs.promises.unlink(tempInputPath).catch(e => console.error("Failed to clean up input file:", e));
           fs.promises.unlink(tempOutputPath).catch(e => console.error("Failed to clean up output file:", e));
         });

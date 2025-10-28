@@ -61,7 +61,6 @@ const analyzeTextInputForEmotionFlow = ai.defineFlow(
     name: 'analyzeTextInputForEmotionFlow',
     inputSchema: AnalyzeTextInputForEmotionInputSchema,
     outputSchema: AnalyzeTextInputForEmotionOutputSchema,
-    model: 'googleai/gemini-1.5-flash',
   },
   async input => {
     const {output} = await prompt(input);

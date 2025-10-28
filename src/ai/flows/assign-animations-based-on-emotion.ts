@@ -82,7 +82,6 @@ const assignAnimationsBasedOnEmotionFlow = ai.defineFlow(
     name: 'assignAnimationsBasedOnEmotionFlow',
     inputSchema: AssignAnimationsBasedOnEmotionInputSchema,
     outputSchema: AssignAnimationsBasedOnEmotionOutputSchema,
-    model: 'googleai/gemini-1.5-flash',
   },
   async input => {
     const {output} = await prompt(input);
