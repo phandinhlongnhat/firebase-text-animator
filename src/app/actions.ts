@@ -132,8 +132,8 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
             .duration(duration)
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error creating animation: ${err.message}`)))
-            .save(animationFilename)
-            .cwd(tempDir); // Set Current Working Directory
+            .cwd(tempDir) // Set Current Working Directory
+            .save(animationFilename);
     });
 
     // 4. Combine and render
@@ -163,8 +163,8 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
         command
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error combining media: ${err.message}`)))
-            .save(outputFilename)
-            .cwd(tempDir); // Set Current Working Directory
+            .cwd(tempDir) // Set Current Working Directory
+            .save(outputFilename);
     });
 
     // 5. Read the final video and return as data URL
