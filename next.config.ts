@@ -30,9 +30,10 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  // Add experimental config to allow cross-origin requests in dev mode
   experimental: {
-    
+    serverActions: {
+      bodySizeLimit: '100mb', // Increase body size limit for large frame data uploads
+    },
   },
    webpack(config, { isServer }) {
     if (!isServer) {
@@ -44,7 +45,6 @@ const nextConfig: NextConfig = {
         };
     }
     
-    // Set up headers for SharedArrayBuffer
     config.experiments = { ...config.experiments, asyncWebAssembly: true, layers: true };
 
     return config;

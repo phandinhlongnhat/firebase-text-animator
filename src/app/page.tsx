@@ -223,9 +223,9 @@ export default function Home() {
             key={`${file?.name}`}
             data={animationData}
             isGeneratingAnimation={isGeneratingAnimation}
+            mediaFile={file}
             mediaUrl={fileDataUrl}
             mediaType={file?.type}
-            srt={srt}
           />
         </div>
       </div>

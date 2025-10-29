@@ -9,14 +9,11 @@ import {
   Rewind,
   Smartphone,
   Sparkles,
-  Timer,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as htmlToImage from 'html-to-image';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
 import type { AnimationSegment } from '@/app/types';
 import { Button } from '@/components/ui/button';
@@ -27,15 +24,16 @@ import { Slider } from './ui/slider';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import { renderVideoOnServer } from '@/app/actions';
 
 const FRAME_RATE = 25;
 
 interface AnimationPreviewProps {
   data: AnimationSegment[] | null;
   isGeneratingAnimation: boolean;
+  mediaFile?: File | null;
   mediaUrl?: string | null;
   mediaType?: string | null;
-  srt?: string;
 }
 
 type AspectRatio = '9:16' | '16:9';
@@ -56,6 +54,7 @@ const getAnimationClasses = (animations: string[]) => {
 export function AnimationPreview({
   data,
   isGeneratingAnimation,
+  mediaFile,
   mediaUrl,
   mediaType,
 }: AnimationPreviewProps) {
@@ -71,9 +70,6 @@ export function AnimationPreview({
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderMessage, setRenderMessage] = useState('');
-
-  const ffmpegRef = useRef(new FFmpeg());
-  const [ffmpegLoaded, setFfmpegLoaded] = useState(false);
 
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement>(null);
   const animationFrameId = useRef<number>();
@@ -92,32 +88,6 @@ export function AnimationPreview({
     return 10;
   }, [data, mediaRef.current?.duration]);
 
-  const loadFFmpeg = async () => {
-    const ffmpeg = ffmpegRef.current;
-    if (ffmpeg.loaded) {
-      setFfmpegLoaded(true);
-      return;
-    }
-    setRenderMessage('Loading FFmpeg engine...');
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-    ffmpeg.on('log', ({ message }) => {
-      console.log(message);
-    });
-     ffmpeg.on('progress', ({ progress, time }) => {
-        setRenderProgress(75 + (progress * 25)); // Assume encoding is last 25%
-        setRenderMessage(`Encoding... ${Math.round(progress * 100)}%`);
-    });
-    setFfmpegLoaded(true);
-    setRenderMessage('');
-  };
-
-  useEffect(() => {
-    loadFFmpeg();
-  }, []);
 
   useEffect(() => {
     if (mediaRef.current) {
@@ -129,144 +99,68 @@ export function AnimationPreview({
 
 
   const handleDownload = async () => {
-    if (!data || !mediaUrl || isRendering || !animationContainerRef.current) return;
+    if (!data || !mediaFile || isRendering || !textAnimationContainerRef.current) return;
     
-    if (!ffmpegLoaded) {
-        toast({ title: "Rendering engine not ready", description: "FFmpeg is still loading, please wait.", variant: "destructive"});
-        return;
-    }
-
     setIsRendering(true);
     setIsPlaying(false);
-    if(mediaRef.current) {
-      mediaRef.current.pause();
-      mediaRef.current.currentTime = 0;
-    }
+    if(mediaRef.current) mediaRef.current.pause();
 
-    const ffmpeg = ffmpegRef.current;
-    const animationNode = animationContainerRef.current!;
     const duration = totalDuration;
     const numFrames = Math.floor(duration * FRAME_RATE);
 
-    const cleanupFiles: string[] = [];
-
     try {
-        // --- STAGE 1: Prepare Media ---
-        setRenderProgress(0);
-        setRenderMessage('Preparing media...');
-        const sourceFileName = isVideo ? 'input.mp4' : 'input.mp3';
-        const inputAudioFilename = 'input_audio.aac';
-        cleanupFiles.push(sourceFileName, inputAudioFilename);
-
-        await ffmpeg.writeFile(sourceFileName, await fetchFile(mediaUrl));
-
-        let audioExists = false;
-        try {
-            // Extract audio, ignore errors if no audio stream
-            await ffmpeg.exec(['-i', sourceFileName, '-vn', '-c:a', 'copy', inputAudioFilename, '-y']);
-            // Check if file was created (size > 0)
-            const audioData = await ffmpeg.readFile(inputAudioFilename);
-            if (audioData.length > 0) {
-                audioExists = true;
-            }
-        } catch (e) {
-            console.log("Could not extract audio, probably no audio stream.");
-            audioExists = false;
-        }
-
-        // --- STAGE 2: Capture Frames ---
         setRenderMessage('Capturing animation frames...');
         const framePromises: Promise<string>[] = [];
-
-        const mediaEl = mediaRef.current;
         
         for (let i = 0; i < numFrames; i++) {
             const time = i / FRAME_RATE;
-
-            if (mediaEl) {
-              mediaEl.currentTime = time;
-              await sleep(40); // Increased sleep to allow video to seek and render
-            }
-
             const activeSegments = data.filter(segment => time >= segment.startTime && time < segment.endTime);
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
             
             await sleep(10); 
             
-            const framePromise = htmlToImage.toPng(animationNode, {
-                quality: 0.9, // Slightly reduce quality to save memory
+            const framePromise = htmlToImage.toPng(textAnimationContainerRef.current!, {
+                quality: 1,
                 pixelRatio: 1,
-                fetchRequestInit: {
-                    mode: 'cors',
-                    cache: 'no-cache'
-                }
+                backgroundColor: 'transparent',
             });
             framePromises.push(framePromise);
-            setRenderProgress(25 + ((i + 1) / numFrames) * 50); 
+            setRenderProgress( (i / numFrames) * 100); 
         }
 
         const frameDataUrls = await Promise.all(framePromises);
 
-        for (let i = 0; i < frameDataUrls.length; i++) {
-            const frameFilename = `frame-${String(i).padStart(5, '0')}.png`;
-            cleanupFiles.push(frameFilename);
-            await ffmpeg.writeFile(frameFilename, await fetchFile(frameDataUrls[i]));
+        setRenderMessage('Uploading data to server for rendering...');
+        setRenderProgress(0); // Reset for upload/render progress
+
+        const formData = new FormData();
+        formData.append('mediaFile', mediaFile);
+        frameDataUrls.forEach(url => formData.append('frames', url));
+        formData.append('duration', String(duration));
+        formData.append('frameRate', String(FRAME_RATE));
+        formData.append('isVideo', String(!!isVideo));
+
+        const result = await renderVideoOnServer(formData);
+
+        if (result.error) {
+            throw new Error(result.error);
         }
 
-        // --- STAGE 3: Encode Video & Mux Audio ---
-        setRenderProgress(75);
-        setRenderMessage('Encoding video...');
-        
-        const videoOnlyFilename = 'video_only.mp4';
-        const finalOutputFilename = 'output.mp4';
-        cleanupFiles.push(videoOnlyFilename, finalOutputFilename);
-
-        // Create video from image sequence
-        await ffmpeg.exec([
-            '-framerate', String(FRAME_RATE),
-            '-i', 'frame-%05d.png',
-            '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',
-            '-t', String(duration),
-            '-y',
-            videoOnlyFilename
-        ]);
-
-        if (audioExists) {
-            setRenderMessage('Adding audio...');
-            // Mux video and audio
-            await ffmpeg.exec([
-                '-i', videoOnlyFilename,
-                '-i', inputAudioFilename,
-                '-c:v', 'copy', // copy video stream
-                '-c:a', 'copy', // copy audio stream
-                '-shortest',
-                '-y',
-                finalOutputFilename
-            ]);
-        } else {
-            // If no audio, the video-only file is our final product
-            await ffmpeg.rename(videoOnlyFilename, finalOutputFilename);
+        if(result.videoUrl) {
+            const a = document.createElement('a');
+            a.href = result.videoUrl;
+            a.download = `aivos-animation-${Date.now()}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            // No need to revoke, as it's a data URL from server
+            
+            toast({
+                title: 'Render Complete!',
+                description: 'Your video has been downloaded.',
+            });
         }
-
-        setRenderMessage('Finalizing video...');
-        const outputData = await ffmpeg.readFile(finalOutputFilename);
-        const dataBlob = new Blob([outputData], { type: 'video/mp4' });
-        const url = URL.createObjectURL(dataBlob);
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `aivos-animation-${Date.now()}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        toast({
-            title: 'Render Complete!',
-            description: 'Your video has been downloaded.',
-        });
 
     } catch (e: any) {
         console.error("Render failed:", e);
@@ -279,15 +173,6 @@ export function AnimationPreview({
         setIsRendering(false);
         setRenderProgress(0);
         setRenderMessage('');
-        
-        // Cleanup files
-        for (const file of cleanupFiles) {
-            try {
-                await ffmpeg.deleteFile(file);
-            } catch(e) {
-                // Ignore errors during cleanup
-            }
-        }
     }
   };
 
@@ -308,7 +193,6 @@ export function AnimationPreview({
         setProgress(100);
       }
     } else {
-      // Fallback for when media is not available (e.g. only SRT)
       const elapsed = (progress / 100) * totalDuration + 16 / 1000; 
       currentTime = elapsed;
       if (currentTime >= totalDuration) {
@@ -370,7 +254,7 @@ export function AnimationPreview({
     if (mediaRef.current) mediaRef.current.currentTime = 0;
   }, [data, mediaUrl]);
 
-  const animationContainerRef = useRef<HTMLDivElement>(null);
+  const textAnimationContainerRef = useRef<HTMLDivElement>(null);
 
   const textClasses = cn(
     'font-bold font-headline text-white',
@@ -396,7 +280,6 @@ export function AnimationPreview({
           .catch(console.error);
       }
     } else {
-      // For SRT only preview
       if (progress >= 100) {
         setProgress(0);
         setCurrentSegments([]);
@@ -417,7 +300,6 @@ export function AnimationPreview({
       if (media && isFinite(newTime)) {
         media.currentTime = newTime;
       }
-      // Update segments immediately on seek
       const activeSegments =
         data?.filter(
           (segment) => newTime >= segment.startTime && newTime < segment.endTime
@@ -465,7 +347,7 @@ export function AnimationPreview({
   return (
     <Card className="flex flex-col sticky top-8">
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="font-headline">2. Preview & Download</CardTitle>
+        <CardTitle className="font-headline">2. Preview &amp; Download</CardTitle>
         <ToggleGroup
           type="single"
           value={aspectRatio}
@@ -482,8 +364,6 @@ export function AnimationPreview({
       </CardHeader>
       <CardContent className="flex flex-1 flex-col justify-center space-y-4">
         <div
-          id="animation-container"
-          ref={animationContainerRef}
           className={cn(
             'relative w-full overflow-hidden rounded-lg flex items-center justify-center transition-all bg-black',
             aspectRatio === '16:9'
@@ -517,65 +397,67 @@ export function AnimationPreview({
               </>
             )}
 
-            <div key={key} className={textClasses}>
-              {currentSegments.map((segment) => {
-                const segmentLetterAnimationType = segment.animations.includes(
-                  'bounceLetters'
-                )
-                  ? 'bounce'
-                  : segment.animations.includes('rainText')
-                  ? 'rain'
-                  : null;
+            <div ref={textAnimationContainerRef} className="absolute inset-0">
+                <div key={key} className={textClasses}>
+                  {currentSegments.map((segment) => {
+                    const segmentLetterAnimationType = segment.animations.includes(
+                      'bounceLetters'
+                    )
+                      ? 'bounce'
+                      : segment.animations.includes('rainText')
+                      ? 'rain'
+                      : null;
 
-                const animationDuration = segment.endTime - segment.startTime;
-                const style = segment.animations.includes('karaoke-fill')
-                  ? ({
-                      '--animation-duration': `${animationDuration}s`,
-                    } as React.CSSProperties)
-                  : {};
-                const animationClass = getAnimationClasses(segment.animations);
+                    const animationDuration = segment.endTime - segment.startTime;
+                    const style = segment.animations.includes('karaoke-fill')
+                      ? ({
+                          '--animation-duration': `${animationDuration}s`,
+                        } as React.CSSProperties)
+                      : {};
+                    const animationClass = getAnimationClasses(segment.animations);
 
-                return (
-                  <div
-                    key={segment.startTime}
-                    className={cn(
-                      segment.animations.includes('glow-text')
-                        ? 'animation-glow-text'
-                        : ''
-                    )}
-                  >
-                    {segmentLetterAnimationType ? (
-                      <h2 className={cn(animationClass)}>
-                        {segment.text.split('').map((char, index) => (
-                          <span
-                            key={index}
-                            className={cn(
-                              segmentLetterAnimationType === 'bounce' &&
-                                'letter-bounce',
-                              segmentLetterAnimationType === 'rain' &&
-                                'letter-rain'
-                            )}
-                            style={
-                              {
-                                '--letter-delay': `${index * 0.05}s`,
-                              } as React.CSSProperties
-                            }
-                          >
-                            {char === ' ' ? '\u00A0' : char}
-                          </span>
-                        ))}
-                      </h2>
-                    ) : (
-                      <h2
-                        className={cn(animationClass, 'whitespace-normal')}
-                        style={style}
+                    return (
+                      <div
+                        key={segment.startTime}
+                        className={cn(
+                          segment.animations.includes('glow-text')
+                            ? 'animation-glow-text'
+                            : ''
+                        )}
                       >
-                        {segment.text}
-                      </h2>
-                    )}
-                  </div>
-                );
-              })}
+                        {segmentLetterAnimationType ? (
+                          <h2 className={cn(animationClass)}>
+                            {segment.text.split('').map((char, index) => (
+                              <span
+                                key={index}
+                                className={cn(
+                                  segmentLetterAnimationType === 'bounce' &&
+                                    'letter-bounce',
+                                  segmentLetterAnimationType === 'rain' &&
+                                    'letter-rain'
+                                )}
+                                style={
+                                  {
+                                    '--letter-delay': `${index * 0.05}s`,
+                                  } as React.CSSProperties
+                                }
+                              >
+                                {char === ' ' ? '\u00A0' : char}
+                              </span>
+                            ))}
+                          </h2>
+                        ) : (
+                          <h2
+                            className={cn(animationClass, 'whitespace-normal')}
+                            style={style}
+                          >
+                            {segment.text}
+                          </h2>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
             </div>
           {renderStatus()}
         </div>
@@ -653,7 +535,7 @@ export function AnimationPreview({
             </div>
             <Button
               onClick={handleDownload}
-              disabled={isGeneratingAnimation || isRendering || !mediaUrl || !ffmpegLoaded}
+              disabled={isGeneratingAnimation || isRendering || !mediaUrl}
               size="lg"
             >
               {isRendering ? (
@@ -663,7 +545,6 @@ export function AnimationPreview({
               )}
               {isRendering ? 'Rendering...' : 'Download Video'}
             </Button>
-             {!ffmpegLoaded && !isRendering && <p className="text-xs text-center text-muted-foreground">{renderMessage || 'Waiting for rendering engine to load...'}</p>}
           </div>
         )}
       </CardContent>
