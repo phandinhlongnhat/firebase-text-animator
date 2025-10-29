@@ -35,12 +35,6 @@ const nextConfig: NextConfig = {
     
   },
    webpack(config, { isServer }) {
-    // Add a rule to handle wasm files
-    config.module.rules.push({
-      test: /\.wasm$/,
-      type: 'asset/resource',
-    });
-
     if (!isServer) {
         config.resolve.fallback = {
             ...config.resolve.fallback,
@@ -51,7 +45,6 @@ const nextConfig: NextConfig = {
     }
     
     // Set up headers for SharedArrayBuffer
-    config.output.webassemblyModuleFilename = 'static/wasm/[modulehash].wasm';
     config.experiments = { ...config.experiments, asyncWebAssembly: true, layers: true };
 
     return config;

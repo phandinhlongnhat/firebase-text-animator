@@ -99,17 +99,18 @@ export function AnimationPreview({
       return;
     }
     setRenderMessage('Loading FFmpeg engine...');
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
+    const baseURL = 'https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/umd'
     await ffmpeg.load({
       coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
       wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript'),
     });
     ffmpeg.on('log', ({ message }) => {
       console.log(message);
     });
      ffmpeg.on('progress', ({ progress, time }) => {
-        setRenderProgress(50 + progress * 50);
-        setRenderMessage(`Encoding... Frame time: ${time/1000000}s`);
+        setRenderProgress(50 + (progress * 50));
+        setRenderMessage(`Encoding video... ${Math.round(progress * 100)}%`);
     });
     setFfmpegLoaded(true);
     setRenderMessage('');
@@ -142,6 +143,7 @@ export function AnimationPreview({
 
     const ffmpeg = ffmpegRef.current;
     const animationNode = animationContainerRef.current!;
+    const { width, height } = animationNode.getBoundingClientRect();
     const duration = totalDuration;
     const numFrames = Math.floor(duration * FRAME_RATE);
     
@@ -155,17 +157,23 @@ export function AnimationPreview({
         setRenderMessage('Preparing media...');
         await ffmpeg.writeFile(sourceFilename, await fetchFile(mediaUrl));
 
-        if (isVideo) {
-            setRenderMessage('Extracting audio from video...');
-            await ffmpeg.exec(['-i', sourceFilename, '-vn', '-c:a', 'copy', inputAudioFilename]);
-        } else {
-            // If it's audio, we can just use it directly
-            await ffmpeg.exec(['-i', sourceFilename, '-c:a', 'aac', inputAudioFilename]);
+        let audioExists = false;
+        try {
+            if (isVideo) {
+                setRenderMessage('Extracting audio from video...');
+                await ffmpeg.exec(['-i', sourceFilename, '-vn', '-c:a', 'copy', '-y', inputAudioFilename]);
+            } else {
+                setRenderMessage('Converting audio...');
+                await ffmpeg.exec(['-i', sourceFilename, '-c:a', 'aac', '-y', inputAudioFilename]);
+            }
+            audioExists = true;
+        } catch (e) {
+            console.warn("Could not extract or convert audio. The video will be silent.", e);
         }
+        
 
         setRenderMessage('Capturing animation frames (this might take a while)...');
-        const framePromises: Promise<string>[] = [];
-
+        
         const mediaEl = mediaRef.current;
         if(mediaEl) mediaEl.currentTime = 0;
         
@@ -174,7 +182,6 @@ export function AnimationPreview({
             
             if (mediaEl) {
               mediaEl.currentTime = time;
-              // For video, we need to wait for the frame to be ready
               if (isVideo && 'seeked' in mediaEl) {
                   await new Promise(resolve => {
                       const onSeeked = () => {
@@ -183,6 +190,8 @@ export function AnimationPreview({
                       }
                       mediaEl.addEventListener('seeked', onSeeked);
                   });
+              } else {
+                await sleep(1000 / FRAME_RATE);
               }
             }
             
@@ -190,9 +199,9 @@ export function AnimationPreview({
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
             
-            await sleep(10); 
+            await sleep(10); // Give React time to re-render
             
-            const framePromise = htmlToImage.toPng(animationNode, {
+            const canvas = await htmlToImage.toCanvas(animationNode, {
                 quality: 1,
                 pixelRatio: 1,
                  fetchRequestInit: {
@@ -200,39 +209,27 @@ export function AnimationPreview({
                     cache: 'no-cache'
                 }
             });
-            framePromises.push(framePromise);
-            setRenderProgress((i / numFrames) * 50); 
+            const ctx = canvas.getContext('2d');
+            const rgba = ctx!.getImageData(0, 0, width, height).data;
+            await ffmpeg.writeFile(`frame-${String(i).padStart(5, '0')}.rgba`, rgba);
+
+            setRenderProgress(((i + 1) / numFrames) * 50); 
         }
 
-        const frameDataUrls = await Promise.all(framePromises);
 
         if(mediaEl) mediaEl.currentTime = 0;
         setProgress(0);
         setCurrentSegments([]);
 
-        setRenderMessage('Writing frames to FFmpeg...');
-        for (let i = 0; i < frameDataUrls.length; i++) {
-            const dataUrl = frameDataUrls[i];
-            const frameData = await fetchFile(dataUrl);
-            await ffmpeg.writeFile(`frame-${String(i).padStart(5, '0')}.png`, frameData);
-        }
-
         setRenderMessage('Combining frames and audio...');
         setRenderProgress(50);
-        
-        let audioExists = false;
-        try {
-          await ffmpeg.readFile(inputAudioFilename);
-          audioExists = true;
-        } catch(e) {
-          audioExists = false;
-          console.warn("Could not find extracted audio file. The video will be silent.");
-        }
-
 
         const ffmpegArgs = [
-            '-framerate', String(FRAME_RATE),
-            '-i', 'frame-%05d.png',
+            '-f', 'rawvideo',
+            '-pix_fmt', 'rgba',
+            '-s', `${width}x${height}`,
+            '-r', String(FRAME_RATE),
+            '-i', 'frame-%05d.rgba',
         ];
 
         if (audioExists) {
@@ -244,7 +241,6 @@ export function AnimationPreview({
         ffmpegArgs.push(
             '-c:v', 'libx264',
             '-pix_fmt', 'yuv420p',
-            '-t', String(duration),
             '-y',
             finalOutputFilename
         );
@@ -285,7 +281,7 @@ export function AnimationPreview({
         try {
             for (let i = 0; i < numFrames; i++) {
                 try {
-                    await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
+                    await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.rgba`);
                 } catch (e) {}
             }
             try { await ffmpeg.deleteFile(sourceFilename); } catch (e) {}
@@ -486,8 +482,7 @@ export function AnimationPreview({
       <CardContent className="flex flex-1 flex-col justify-center space-y-4">
         <div
           className={cn(
-            'relative w-full overflow-hidden rounded-lg flex items-center justify-center transition-all',
-            !isVideo && 'bg-slate-900',
+            'relative w-full overflow-hidden rounded-lg flex items-center justify-center transition-all bg-black',
             aspectRatio === '16:9'
               ? 'aspect-video'
               : 'aspect-[9/16] max-h-[70vh] mx-auto'
@@ -500,19 +495,22 @@ export function AnimationPreview({
                   <video
                     ref={mediaRef as React.Ref<HTMLVideoElement>}
                     src={mediaUrl}
-                    className="absolute top-0 left-0 h-full w-full object-cover"
+                    className="absolute top-0 left-0 h-full w-full object-contain"
                     playsInline
                     key={mediaUrl}
                     crossOrigin="anonymous"
                   />
                 )}
                 {isAudio && !isVideo && (
+                  <>
+                  <div className="absolute inset-0 bg-slate-900"></div>
                   <audio
                     ref={mediaRef as React.Ref<HTMLAudioElement>}
                     src={mediaUrl}
                     key={mediaUrl}
                     crossOrigin="anonymous"
                   />
+                  </>
                 )}
               </>
             )}
