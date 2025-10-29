@@ -32,9 +32,7 @@ const nextConfig: NextConfig = {
   },
   // Add experimental config to allow cross-origin requests in dev mode
   experimental: {
-    allowedDevOrigins: [
-      'https://6000-firebase-studio-1761489309411.cluster-nle52mxuvfhlkrzyrq6g2cwb52.cloudworkstations.dev',
-    ],
+    
   },
    webpack(config, { isServer }) {
     // Add a rule to handle wasm files
@@ -68,7 +66,7 @@ const nextConfig: NextConfig = {
             value: 'same-origin',
           },
           {
-            key: 'Cross-origin-Embedder-Policy',
+            key: 'Cross-Origin-Embedder-Policy',
             value: 'require-corp',
           },
         ],
