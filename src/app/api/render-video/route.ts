@@ -7,22 +7,23 @@ import { z } from 'zod';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 
-// --- DYNAMIC FONT MANAGEMENT ---
-// This new approach allows for easy expansion of fonts.
-// 1. Fonts are now stored in `public/fonts`.
-// 2. We dynamically scan this directory to build a map of available fonts.
-// 3. The API now accepts a `fontFamily` parameter.
-// 4. The hardcoded Windows font logic is removed.
+// --- ROBUST ASYNCHRONOUS INITIALIZATION ---
+// THE PROBLEM: The previous code had a race condition. `initializeFonts` was async,
+// but the `POST` handler didn't wait for it to finish. A request could come in
+// before the `fontMap` was populated, causing the "No fonts found" error.
+//
+// THE SOLUTION: We now call `initializeFonts` at the module level and store its
+// returned Promise. The VERY FIRST thing the `POST` handler does is `await` this
+// promise. This creates a mandatory checkpoint, guaranteeing that the font map is
+// fully populated before any request processing begins.
 
 const ffmpegPath = process.env.FFMPEG_PATH;
 const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
 process.env.FONTCONFIG_FILE = fontConfigPath;
 
-// --- FONT DISCOVERY (RUNS ONCE AT STARTUP) ---
-const fontsDir = path.join(process.cwd(), 'public', 'fonts');
-let fontMap: Map<string, string> = new Map();
-
-async function initializeFonts() {
+async function initializeFonts(): Promise<Map<string, string>> {
+  const fontMap = new Map<string, string>();
+  const fontsDir = path.join(process.cwd(), 'public', 'fonts');
   try {
     const fontFiles = await fs.readdir(fontsDir);
     for (const file of fontFiles) {
@@ -31,23 +32,24 @@ async function initializeFonts() {
         fontMap.set(fontFamily.toLowerCase(), path.join(fontsDir, file));
       }
     }
+    if (fontMap.size === 0) {
+        console.warn(`No .ttf fonts found in ${fontsDir}.`);
+    }
     console.log('Initialized fonts:', Array.from(fontMap.keys()));
-  } catch (error) {
-    console.error('Error initializing fonts:', error);
-    // Fallback to a default font if scanning fails
-    const defaultFontPath = path.join(fontsDir, 'Roboto-Bold.ttf');
-    fontMap.set('roboto-bold', defaultFontPath);
+  } catch (error: any) {
+    console.error(`Error initializing fonts: Could not read directory ${fontsDir}.`, error.message);
   }
+  return fontMap;
 }
 
-// Initialize fonts when the server starts
-initializeFonts();
+// Store the promise returned by the async initialization function.
+const fontMapPromise = initializeFonts();
 
 const AnimationSegmentSchemaWithFont = z.object({
   text: z.string(),
   startTime: z.number(),
   endTime: z.number(),
-  fontFamily: z.string().optional(), // New optional field
+  fontFamily: z.string().optional(),
 });
 
 const RequestBodySchema = z.object({
@@ -55,7 +57,6 @@ const RequestBodySchema = z.object({
   segments: z.array(AnimationSegmentSchemaWithFont),
 });
 
-// Escaping functions remain unchanged and essential
 function escapeFFmpegDrawtext(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/'/g, `'\\''`).replace(/:/g, '\\:').replace(/%/g, '\\%');
 }
@@ -66,6 +67,9 @@ function escapeWindowsPathForFFmpeg(p: string): string {
 
 export async function POST(req: NextRequest) {
   try {
+    // **THE FIX**: Await the font initialization promise here.
+    const fontMap = await fontMapPromise;
+
     const body = await req.json();
     const validation = RequestBodySchema.safeParse(body);
     if (!validation.success) {
@@ -79,17 +83,17 @@ export async function POST(req: NextRequest) {
     if (!ffmpegPath) {
       return NextResponse.json({ error: 'FFMPEG path not configured.' }, { status: 500 });
     }
+    
+    const defaultFontPath = fontMap.get('roboto-bold') || (fontMap.size > 0 ? Array.from(fontMap.values())[0] : undefined);
+    if (!defaultFontPath) {
+      throw new Error('No fonts were successfully initialized. Check the `public/fonts` directory and ensure it contains .ttf files. See server startup logs for details.');
+    }
 
     const response = await fetch(mediaUrl);
     if (!response.ok || !response.body) {
       throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
     }
     const inputStream = Readable.fromWeb(response.body as any);
-
-    const defaultFontPath = fontMap.get('roboto-bold') || Array.from(fontMap.values())[0];
-    if (!defaultFontPath) {
-      throw new Error('No fonts found in public/fonts directory.');
-    }
 
     const drawtextFilters = segments
       .map((segment) => {
@@ -109,8 +113,6 @@ export async function POST(req: NextRequest) {
       '-f', 'mp4',
       'pipe:1',
     ];
-
-    console.log(`Spawning ffmpeg with args: ${ffmpegArgs.join(' ')}`);
 
     const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
     const passthrough = new PassThrough();
