@@ -214,7 +214,7 @@ export function AnimationPreview({
             await ffmpeg.exec([
                 '-i', 'animation.webm',
                 '-i', 'input.mp3',
-                '-c:v', 'libx264',
+                '-c:v', 'libvpx-vp9',
                 '-c:a', 'aac',
                 '-shortest', 
                 '-y',
