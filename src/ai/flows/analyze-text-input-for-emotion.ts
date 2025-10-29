@@ -28,15 +28,19 @@ export async function analyzeTextInputForEmotion(input: AnalyzeTextInputForEmoti
   return analyzeTextInputForEmotionFlow(input);
 }
 
-const prompt = ai.definePrompt({
-  name: 'analyzeTextInputForEmotionPrompt',
-  input: {schema: AnalyzeTextInputForEmotionInputSchema},
-  output: {schema: AnalyzeTextInputForEmotionOutputSchema},
-  prompt: `You are an AI that analyzes the emotion of text segments and suggests suitable animations.
+const analyzeTextInputForEmotionFlow = ai.defineFlow(
+  {
+    name: 'analyzeTextInputForEmotionFlow',
+    inputSchema: AnalyzeTextInputForEmotionInputSchema,
+    outputSchema: AnalyzeTextInputForEmotionOutputSchema,
+  },
+  async input => {
+    const {output} = await ai.generate({
+      prompt: `You are an AI that analyzes the emotion of text segments and suggests suitable animations.
 
 Analyze the following text and determine the emotion conveyed by each sentence or phrase. Suggest animations that would be appropriate for each segment based on its emotion.
 
-Text: {{{text}}}
+Text: ${input.text}
 
 Respond with a JSON array, where each object contains the original text segment, the detected emotion, and an array of suggested animations.  The 'emotion' field should be a single word describing the primary emotion (e.g., 'sad', 'happy', 'energetic', 'calm', 'angry').  The animations should be selected from this list: fadeIn, rainText, bounceLetters, flash, slide, zoom-in, shake, gradient-text. If no animations are suitable, return an empty array for animations.
 
@@ -54,16 +58,11 @@ Example output:
   }
 ]
 `,
-});
-
-const analyzeTextInputForEmotionFlow = ai.defineFlow(
-  {
-    name: 'analyzeTextInputForEmotionFlow',
-    inputSchema: AnalyzeTextInputForEmotionInputSchema,
-    outputSchema: AnalyzeTextInputForEmotionOutputSchema,
-  },
-  async input => {
-    const {output} = await prompt(input);
+      model: 'googleai/gemini-1.5-flash',
+      output: {
+        schema: AnalyzeTextInputForEmotionOutputSchema
+      }
+    });
     return output!;
   }
 );

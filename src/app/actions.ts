@@ -1,5 +1,6 @@
 'use server';
 
+import { analyzeTextInputForEmotion } from '@/ai/flows/analyze-text-input-for-emotion';
 import type { AnimationSegment } from './types';
 
 
@@ -13,8 +14,8 @@ function parseTimeToSeconds(time: string): number {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-function parseSrt(srtContent: string): AnimationSegment[] {
-  const segments: AnimationSegment[] = [];
+function parseSrt(srtContent: string): Omit<AnimationSegment, 'emotion' | 'animations'>[] {
+  const segments: Omit<AnimationSegment, 'emotion' | 'animations'>[] = [];
   const blocks = srtContent.trim().replace(/\r\n/g, '\n').split('\n\n');
 
   for (const block of blocks) {
@@ -46,8 +47,6 @@ function parseSrt(srtContent: string): AnimationSegment[] {
         startTime,
         endTime,
         text,
-        emotion: 'neutral', // Default emotion
-        animations: ['fadeIn'], // Default animation
       });
     }
   }
@@ -71,13 +70,26 @@ export async function generateAnimationFromSrtAction(
       };
     }
     
-    // Just return the parsed segments directly, without AI enrichment.
-    return { data: srtSegments, error: null };
-  } catch (e) {
+    const fullText = srtSegments.map(s => s.text).join('\n');
+    const analysis = await analyzeTextInputForEmotion({ text: fullText });
+
+    // A simple mapping strategy: find the original segment by exact text match
+    const enrichedSegments = srtSegments.map(srtSeg => {
+      const analyzedSeg = analysis.find(a => a.text.includes(srtSeg.text));
+      return {
+        ...srtSeg,
+        emotion: analyzedSeg?.emotion || 'neutral',
+        animations: analyzedSeg?.animations || ['fadeIn'],
+      };
+    });
+
+    return { data: enrichedSegments, error: null };
+  } catch (e: any) {
     console.error(e);
+    const errorMessage = e.message || "An unknown error occurred with the AI model.";
     return {
       data: null,
-      error: 'Failed to process SRT data. Please try again.',
+      error: `Failed to analyze text with AI. ${errorMessage}`,
     };
   }
 }
