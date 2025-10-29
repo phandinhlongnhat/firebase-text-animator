@@ -220,7 +220,15 @@ export function AnimationPreview({
         setRenderMessage('Combining frames and audio...');
         setRenderProgress(50);
         
-        const audioExists = await ffmpeg.pathExists(inputAudioFilename);
+        let audioExists = false;
+        try {
+          await ffmpeg.readFile(inputAudioFilename);
+          audioExists = true;
+        } catch(e) {
+          audioExists = false;
+          console.warn("Could not find extracted audio file. The video will be silent.");
+        }
+
 
         const ffmpegArgs = [
             '-framerate', String(FRAME_RATE),
@@ -273,15 +281,16 @@ export function AnimationPreview({
         setRenderProgress(0);
         setRenderMessage('');
         
+        // Cleanup files
         try {
             for (let i = 0; i < numFrames; i++) {
-                if (await ffmpeg.pathExists(`frame-${String(i).padStart(5, '0')}.png`)) {
+                try {
                     await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
-                }
+                } catch (e) {}
             }
-             if (await ffmpeg.pathExists(sourceFilename)) await ffmpeg.deleteFile(sourceFilename);
-             if (await ffmpeg.pathExists(inputAudioFilename)) await ffmpeg.deleteFile(inputAudioFilename);
-             if (await ffmpeg.pathExists(finalOutputFilename)) await ffmpeg.deleteFile(finalOutputFilename);
+            try { await ffmpeg.deleteFile(sourceFilename); } catch (e) {}
+            try { await ffmpeg.deleteFile(inputAudioFilename); } catch (e) {}
+            try { await ffmpeg.deleteFile(finalOutputFilename); } catch (e) {}
         } catch (e) {
             console.warn("Could not clean up some files in ffmpeg memory.");
         }
