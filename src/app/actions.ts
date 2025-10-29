@@ -106,8 +106,9 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aivos-render-'));
   const outputFilename = `output-${Date.now()}.mp4`;
-  const outputPath = path.join(tempDir, outputFilename);
-
+  const animationFilename = 'animation.webm';
+  const mediaFilename = mediaFile.name;
+  
   try {
     // 1. Save all frames to temp directory
     for (let i = 0; i < frameDataUrls.length; i++) {
@@ -119,30 +120,29 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
 
     // 2. Save media file
     const mediaBuffer = Buffer.from(await mediaFile.arrayBuffer());
-    const mediaPath = path.join(tempDir, mediaFile.name);
-    await fs.writeFile(mediaPath, mediaBuffer);
+    await fs.writeFile(path.join(tempDir, mediaFilename), mediaBuffer);
     
     // 3. Create animation video from frames
-    const animationVideoPath = path.join(tempDir, 'animation.webm');
     await new Promise<void>((resolve, reject) => {
         ffmpeg()
-            .input(path.join(tempDir, 'frame-%05d.png'))
+            .input('frame-%05d.png')
             .inputFPS(frameRate)
             .videoCodec('libvpx-vp9')
             .addOption('-pix_fmt', 'yuva420p') // for transparency
             .duration(duration)
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error creating animation: ${err.message}`)))
-            .save(animationVideoPath);
+            .save(animationFilename)
+            .cwd(tempDir); // Set Current Working Directory
     });
 
     // 4. Combine and render
     await new Promise<void>((resolve, reject) => {
-        const command = ffmpeg().input(mediaPath);
+        const command = ffmpeg().input(mediaFilename);
 
         if (isVideo) {
             command
-                .input(animationVideoPath)
+                .input(animationFilename)
                 .complexFilter('[0:v][1:v]overlay[v]')
                 .map('[v]')
                 .map('[0:a]?') // use audio from original video if it exists
@@ -151,7 +151,7 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
                 .outputOptions('-preset', 'fast')
         } else { // Audio source
              command
-                .input(animationVideoPath)
+                .input(animationFilename)
                 .complexFilter('[1:v]format=yuv420p[v]') // convert animation to standard pixel format
                 .map('[v]')
                 .map('[0:a]') // use the audio from the input
@@ -163,11 +163,12 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
         command
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error combining media: ${err.message}`)))
-            .save(outputPath);
+            .save(outputFilename)
+            .cwd(tempDir); // Set Current Working Directory
     });
 
     // 5. Read the final video and return as data URL
-    const videoBuffer = await fs.readFile(outputPath);
+    const videoBuffer = await fs.readFile(path.join(tempDir, outputFilename));
     const videoBase64 = videoBuffer.toString('base64');
     
     return { videoUrl: `data:video/mp4;base64,${videoBase64}` };
