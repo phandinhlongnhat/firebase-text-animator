@@ -144,6 +144,9 @@ export function AnimationPreview({
     const animationNode = animationContainerRef.current!;
     const duration = totalDuration;
     const numFrames = Math.floor(duration * FRAME_RATE);
+    
+    let outputFilename = `aivos-animation-${Date.now()}.mp4`;
+    let outputMimeType = 'video/mp4';
 
     try {
         setRenderMessage('Capturing animation frames...');
@@ -205,7 +208,7 @@ export function AnimationPreview({
             await ffmpeg.exec([
                 '-i', 'input.mp4',
                 '-i', 'animation.webm',
-                '-filter_complex', '[0:v][1:v]overlay', 
+                '-filter_complex', '[0:v]format=yuv420p[bg];[1:v]format=yuva420p[fg];[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2', 
                 '-c:a', 'copy', 
                 '-y',
                 'output.mp4'
@@ -214,22 +217,25 @@ export function AnimationPreview({
             await ffmpeg.exec([
                 '-i', 'animation.webm',
                 '-i', 'input.mp3',
-                '-c:v', 'libvpx-vp9',
-                '-c:a', 'aac',
+                '-c:v', 'copy',
+                '-c:a', 'libvorbis',
                 '-shortest', 
                 '-y',
-                'output.mp4'
+                'output.webm'
             ]);
+            outputFilename = `aivos-animation-${Date.now()}.webm`;
+            outputMimeType = 'video/webm';
         }
-
+        
+        const finalOutputName = isVideo ? 'output.mp4' : 'output.webm';
         setRenderMessage('Finalizing video...');
-        const outputData = await ffmpeg.readFile('output.mp4');
-        const dataBlob = new Blob([outputData], { type: 'video/mp4' });
+        const outputData = await ffmpeg.readFile(finalOutputName);
+        const dataBlob = new Blob([outputData], { type: outputMimeType });
         const url = URL.createObjectURL(dataBlob);
 
         const a = document.createElement('a');
         a.href = url;
-        a.download = `aivos-animation-${Date.now()}.mp4`;
+        a.download = outputFilename;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -262,6 +268,7 @@ export function AnimationPreview({
              if (await ffmpeg.pathExists('input.mp4')) await ffmpeg.deleteFile('input.mp4');
              if (await ffmpeg.pathExists('input.mp3')) await ffmpeg.deleteFile('input.mp3');
              if (await ffmpeg.pathExists('output.mp4')) await ffmpeg.deleteFile('output.mp4');
+             if (await ffmpeg.pathExists('output.webm')) await ffmpeg.deleteFile('output.webm');
         } catch (e) {
             console.warn("Could not clean up some files in ffmpeg memory.");
         }
@@ -617,7 +624,7 @@ export function AnimationPreview({
                     {isMuted ? (
                       <VolumeX className="h-5 w-5" />
                     ) : (
-                      <Volume2 className="h-5 w-s" />
+                      <Volume2 className="h-5 w-5" />
                     )}
                   </Button>
                 )}
