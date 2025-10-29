@@ -145,17 +145,47 @@ export function AnimationPreview({
     const duration = totalDuration;
     const numFrames = Math.floor(duration * FRAME_RATE);
     
-    let outputFilename = `aivos-animation-${Date.now()}.mp4`;
-    let outputMimeType = 'video/mp4';
+    const outputFilename = `aivos-animation-${Date.now()}.mp4`;
+    const inputAudioFilename = 'input_audio.aac';
+    const finalOutputFilename = 'output.mp4';
+    const sourceFilename = isVideo ? 'input.mp4' : 'input.mp3';
+
 
     try {
-        setRenderMessage('Capturing animation frames...');
+        setRenderMessage('Preparing media...');
+        await ffmpeg.writeFile(sourceFilename, await fetchFile(mediaUrl));
+
+        if (isVideo) {
+            setRenderMessage('Extracting audio from video...');
+            await ffmpeg.exec(['-i', sourceFilename, '-vn', '-acodec', 'copy', inputAudioFilename]);
+        } else {
+            // If it's audio, we can just use it directly
+            await ffmpeg.exec(['-i', sourceFilename, '-acodec', 'aac', inputAudioFilename]);
+        }
+
+        setRenderMessage('Capturing animation frames (this might take a while)...');
         const framePromises: Promise<string>[] = [];
 
-        if(mediaRef.current) mediaRef.current.style.opacity = '0';
+        const mediaEl = mediaRef.current;
+        if(mediaEl) mediaEl.currentTime = 0;
         
         for (let i = 0; i < numFrames; i++) {
             const time = i / FRAME_RATE;
+            
+            if (mediaEl) {
+              mediaEl.currentTime = time;
+              // For video, we need to wait for the frame to be ready
+              if (isVideo && 'seeked' in mediaEl) {
+                  await new Promise(resolve => {
+                      const onSeeked = () => {
+                          mediaEl.removeEventListener('seeked', onSeeked);
+                          resolve(null);
+                      }
+                      mediaEl.addEventListener('seeked', onSeeked);
+                  });
+              }
+            }
+            
             const activeSegments = data.filter(segment => time >= segment.startTime && time < segment.endTime);
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
@@ -165,8 +195,7 @@ export function AnimationPreview({
             const framePromise = htmlToImage.toPng(animationNode, {
                 quality: 1,
                 pixelRatio: 1,
-                backgroundColor: 'transparent',
-                fetchRequestInit: {
+                 fetchRequestInit: {
                     mode: 'cors',
                     cache: 'no-cache'
                 }
@@ -175,9 +204,11 @@ export function AnimationPreview({
             setRenderProgress((i / numFrames) * 50); 
         }
 
-        const frameDataUrls = await Promise.all(framePromises);
+        const frameDataUrls = await Promise.all(frameDataUrls);
 
-        if(mediaRef.current) mediaRef.current.style.opacity = '1';
+        if(mediaEl) mediaEl.currentTime = 0;
+        setProgress(0);
+        setCurrentSegments([]);
 
         setRenderMessage('Writing frames to FFmpeg...');
         for (let i = 0; i < frameDataUrls.length; i++) {
@@ -186,51 +217,35 @@ export function AnimationPreview({
             await ffmpeg.writeFile(`frame-${String(i).padStart(5, '0')}.png`, frameData);
         }
 
-        setRenderMessage('Encoding animation video...');
-        setRenderProgress(50); 
-        await ffmpeg.exec([
+        setRenderMessage('Combining frames and audio...');
+        setRenderProgress(50);
+        
+        const audioExists = await ffmpeg.pathExists(inputAudioFilename);
+
+        const ffmpegArgs = [
             '-framerate', String(FRAME_RATE),
             '-i', 'frame-%05d.png',
-            '-c:v', 'libvpx-vp9', 
-            '-pix_fmt', 'yuva420p',
-            '-t', String(duration),
-            '-y',
-            'animation.webm'
-        ]);
+        ];
 
-        setRenderMessage('Fetching source media...');
-        const sourceFileData = await fetchFile(mediaUrl);
-        const sourceFileName = isVideo ? 'input.mp4' : 'input.mp3';
-        await ffmpeg.writeFile(sourceFileName, sourceFileData);
-
-        setRenderMessage('Combining animation and source media...');
-        if(isVideo) {
-            await ffmpeg.exec([
-                '-i', 'input.mp4',
-                '-i', 'animation.webm',
-                '-filter_complex', '[0:v]format=yuv420p[bg];[1:v]format=yuva420p[fg];[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2', 
-                '-c:a', 'copy', 
-                '-y',
-                'output.mp4'
-            ]);
-        } else { 
-            await ffmpeg.exec([
-                '-i', 'animation.webm',
-                '-i', 'input.mp3',
-                '-c:v', 'copy',
-                '-c:a', 'libvorbis',
-                '-shortest', 
-                '-y',
-                'output.webm'
-            ]);
-            outputFilename = `aivos-animation-${Date.now()}.webm`;
-            outputMimeType = 'video/webm';
+        if (audioExists) {
+            ffmpegArgs.push('-i', inputAudioFilename);
+            ffmpegArgs.push('-c:a', 'aac'); 
+            ffmpegArgs.push('-shortest');
         }
         
-        const finalOutputName = isVideo ? 'output.mp4' : 'output.webm';
+        ffmpegArgs.push(
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-t', String(duration),
+            '-y',
+            finalOutputFilename
+        );
+
+        await ffmpeg.exec(ffmpegArgs);
+
         setRenderMessage('Finalizing video...');
-        const outputData = await ffmpeg.readFile(finalOutputName);
-        const dataBlob = new Blob([outputData], { type: outputMimeType });
+        const outputData = await ffmpeg.readFile(finalOutputFilename);
+        const dataBlob = new Blob([outputData], { type: 'video/mp4' });
         const url = URL.createObjectURL(dataBlob);
 
         const a = document.createElement('a');
@@ -264,11 +279,9 @@ export function AnimationPreview({
                     await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
                 }
             }
-             if (await ffmpeg.pathExists('animation.webm')) await ffmpeg.deleteFile('animation.webm');
-             if (await ffmpeg.pathExists('input.mp4')) await ffmpeg.deleteFile('input.mp4');
-             if (await ffmpeg.pathExists('input.mp3')) await ffmpeg.deleteFile('input.mp3');
-             if (await ffmpeg.pathExists('output.mp4')) await ffmpeg.deleteFile('output.mp4');
-             if (await ffmpeg.pathExists('output.webm')) await ffmpeg.deleteFile('output.webm');
+             if (await ffmpeg.pathExists(sourceFilename)) await ffmpeg.deleteFile(sourceFilename);
+             if (await ffmpeg.pathExists(inputAudioFilename)) await ffmpeg.deleteFile(inputAudioFilename);
+             if (await ffmpeg.pathExists(finalOutputFilename)) await ffmpeg.deleteFile(finalOutputFilename);
         } catch (e) {
             console.warn("Could not clean up some files in ffmpeg memory.");
         }
