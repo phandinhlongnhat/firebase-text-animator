@@ -108,11 +108,11 @@ export function AnimationPreview({
       console.log(message);
     });
      ffmpeg.on('progress', ({ progress, time }) => {
-        setRenderProgress(progress * 100);
+        setRenderProgress(50 + progress * 50);
         setRenderMessage(`Encoding... Frame time: ${time/1000000}s`);
     });
     setFfmpegLoaded(true);
-    setRenderMessage('FFmpeg loaded.');
+    setRenderMessage('');
   };
 
   useEffect(() => {
@@ -642,7 +642,7 @@ export function AnimationPreview({
               )}
               {isRendering ? 'Rendering...' : 'Download Video'}
             </Button>
-             {!ffmpegLoaded && !isRendering && <p className="text-xs text-center text-muted-foreground">Waiting for rendering engine to load...</p>}
+             {!ffmpegLoaded && !isRendering && <p className="text-xs text-center text-muted-foreground">{renderMessage || 'Waiting for rendering engine to load...'}</p>}
           </div>
         )}
       </CardContent>
