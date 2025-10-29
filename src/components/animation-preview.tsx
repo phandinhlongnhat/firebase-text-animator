@@ -99,11 +99,10 @@ export function AnimationPreview({
       return;
     }
     setRenderMessage('Loading FFmpeg engine...');
-    const baseURL = 'https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/umd'
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
     await ffmpeg.load({
       coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
       wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-      workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript'),
     });
     ffmpeg.on('log', ({ message }) => {
       console.log(message);
@@ -143,121 +142,110 @@ export function AnimationPreview({
 
     const ffmpeg = ffmpegRef.current;
     const animationNode = animationContainerRef.current!;
-    const { width, height } = animationNode.getBoundingClientRect();
     const duration = totalDuration;
     const numFrames = Math.floor(duration * FRAME_RATE);
-    
-    const outputFilename = `aivos-animation-${Date.now()}.mp4`;
-    const inputAudioFilename = 'input_audio.aac';
-    const finalOutputFilename = 'output.mp4';
-    const sourceFilename = isVideo ? 'input.mp4' : 'input.mp3';
 
+    const cleanupFiles: string[] = [];
 
     try {
-        setRenderMessage('Preparing media...');
-        await ffmpeg.writeFile(sourceFilename, await fetchFile(mediaUrl));
+        setRenderMessage('Capturing animation frames...');
+        const framePromises: Promise<string>[] = [];
 
-        let audioExists = false;
-        try {
-            if (isVideo) {
-                setRenderMessage('Extracting audio from video...');
-                await ffmpeg.exec(['-i', sourceFilename, '-vn', '-c:a', 'copy', '-y', inputAudioFilename]);
-            } else {
-                setRenderMessage('Converting audio...');
-                await ffmpeg.exec(['-i', sourceFilename, '-c:a', 'aac', '-y', inputAudioFilename]);
-            }
-             // Check if file exists by trying to read it
-            await ffmpeg.readFile(inputAudioFilename);
-            audioExists = true;
-        } catch (e) {
-            console.warn("Could not extract or convert audio. The video will be silent.", e);
-            audioExists = false;
-        }
-        
-
-        setRenderMessage('Capturing animation frames (this might take a while)...');
-        
-        const mediaEl = mediaRef.current;
-        if(mediaEl) mediaEl.currentTime = 0;
+        // Hide original media during frame capture
+        if (mediaRef.current) mediaRef.current.style.opacity = '0';
         
         for (let i = 0; i < numFrames; i++) {
             const time = i / FRAME_RATE;
-            
-            if (mediaEl) {
-              mediaEl.currentTime = time;
-              if (isVideo && 'seeked' in mediaEl) {
-                  await new Promise(resolve => {
-                      const onSeeked = () => {
-                          mediaEl.removeEventListener('seeked', onSeeked);
-                          resolve(null);
-                      }
-                      mediaEl.addEventListener('seeked', onSeeked);
-                  });
-              } else {
-                await sleep(1000 / FRAME_RATE);
-              }
-            }
-            
             const activeSegments = data.filter(segment => time >= segment.startTime && time < segment.endTime);
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
             
             await sleep(10); // Give React time to re-render
             
-            const canvas = await htmlToImage.toCanvas(animationNode, {
+            const framePromise = htmlToImage.toPng(animationNode, {
                 quality: 1,
                 pixelRatio: 1,
-                 fetchRequestInit: {
+                backgroundColor: 'transparent',
+                fetchRequestInit: {
                     mode: 'cors',
                     cache: 'no-cache'
                 }
             });
-            const ctx = canvas.getContext('2d');
-            const rgba = ctx!.getImageData(0, 0, width, height).data;
-            await ffmpeg.writeFile(`frame-${String(i).padStart(5, '0')}.rgba`, rgba);
-
+            framePromises.push(framePromise);
             setRenderProgress(((i + 1) / numFrames) * 50); 
         }
 
+        const frameDataUrls = await Promise.all(framePromises);
 
-        if(mediaEl) mediaEl.currentTime = 0;
-        setProgress(0);
-        setCurrentSegments([]);
+        // Show original media again
+        if(mediaRef.current) mediaRef.current.style.opacity = '1';
 
-        setRenderMessage('Combining frames and audio...');
-        setRenderProgress(50);
-
-        const ffmpegArgs = [
-            '-f', 'rawvideo',
-            '-pix_fmt', 'rgba',
-            '-s', `${width}x${height}`,
-            '-r', String(FRAME_RATE),
-            '-i', 'frame-%05d.rgba',
-        ];
-
-        if (audioExists) {
-            ffmpegArgs.push('-i', inputAudioFilename);
-            ffmpegArgs.push('-c:a', 'aac'); 
-            ffmpegArgs.push('-shortest');
+        setRenderMessage('Writing frames to FFmpeg...');
+        for (let i = 0; i < frameDataUrls.length; i++) {
+            const dataUrl = frameDataUrls[i];
+            const frameFilename = `frame-${String(i).padStart(5, '0')}.png`;
+            cleanupFiles.push(frameFilename);
+            await ffmpeg.writeFile(frameFilename, await fetchFile(dataUrl));
         }
-        
-        ffmpegArgs.push(
-            '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',
-            '-y',
-            finalOutputFilename
-        );
 
-        await ffmpeg.exec(ffmpegArgs);
+        setRenderMessage('Encoding animation video...');
+        setRenderProgress(50);
+        const animationVideoFilename = 'animation.webm';
+        cleanupFiles.push(animationVideoFilename);
+        await ffmpeg.exec([
+            '-framerate', String(FRAME_RATE),
+            '-i', 'frame-%05d.png',
+            '-c:v', 'libvpx-vp9', 
+            '-pix_fmt', 'yuva420p', // VP9 with alpha
+            '-t', String(duration),
+            '-y',
+            animationVideoFilename
+        ]);
+
+        setRenderMessage('Fetching source media...');
+        const sourceFileName = isVideo ? 'input.mp4' : 'input.mp3';
+        cleanupFiles.push(sourceFileName);
+        await ffmpeg.writeFile(sourceFileName, await fetchFile(mediaUrl));
+
+        const outputFilename = 'output.mp4';
+        cleanupFiles.push(outputFilename);
+
+        setRenderMessage('Combining animation and source media...');
+        if(isVideo) {
+            // Robust overlay command
+            await ffmpeg.exec([
+                '-i', sourceFileName,
+                '-i', animationVideoFilename,
+                '-filter_complex', '[0:v][1:v]overlay[v]', 
+                '-map', '[v]',
+                '-map', '0:a?', // Map audio from source if it exists
+                '-c:a', 'copy', 
+                '-c:v', 'libx264', // Widely supported codec
+                '-pix_fmt', 'yuv420p', // Standard pixel format for mp4
+                '-y',
+                outputFilename
+            ]);
+        } else { // Is Audio
+            await ffmpeg.exec([
+                '-i', animationVideoFilename,
+                '-i', sourceFileName, // The audio file
+                '-c:v', 'libx264',
+                '-c:a', 'aac', // Re-encode audio to AAC for compatibility
+                '-pix_fmt', 'yuv420p',
+                '-shortest', // Finish encoding when the shortest input ends
+                '-y',
+                outputFilename
+            ]);
+        }
 
         setRenderMessage('Finalizing video...');
-        const outputData = await ffmpeg.readFile(finalOutputFilename);
+        const outputData = await ffmpeg.readFile(outputFilename);
         const dataBlob = new Blob([outputData], { type: 'video/mp4' });
         const url = URL.createObjectURL(dataBlob);
 
         const a = document.createElement('a');
         a.href = url;
-        a.download = outputFilename;
+        a.download = `aivos-animation-${Date.now()}.mp4`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -281,17 +269,12 @@ export function AnimationPreview({
         setRenderMessage('');
         
         // Cleanup files
-        try {
-            for (let i = 0; i < numFrames; i++) {
-                try {
-                    await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.rgba`);
-                } catch (e) {}
+        for (const file of cleanupFiles) {
+            try {
+                await ffmpeg.deleteFile(file);
+            } catch(e) {
+                // Ignore errors during cleanup
             }
-             try { if(sourceFilename) await ffmpeg.deleteFile(sourceFilename); } catch (e) {}
-             try { if(audioExists) await ffmpeg.deleteFile(inputAudioFilename); } catch (e) {}
-             try { if(finalOutputFilename) await ffmpeg.deleteFile(finalOutputFilename); } catch (e) {}
-        } catch (e) {
-            console.warn("Could not clean up some files in ffmpeg memory.");
         }
     }
   };
@@ -313,6 +296,7 @@ export function AnimationPreview({
         setProgress(100);
       }
     } else {
+      // Fallback for when media is not available (e.g. only SRT)
       const elapsed = (progress / 100) * totalDuration + 16 / 1000; 
       currentTime = elapsed;
       if (currentTime >= totalDuration) {
@@ -400,6 +384,7 @@ export function AnimationPreview({
           .catch(console.error);
       }
     } else {
+      // For SRT only preview
       if (progress >= 100) {
         setProgress(0);
         setCurrentSegments([]);
@@ -420,6 +405,7 @@ export function AnimationPreview({
       if (media && isFinite(newTime)) {
         media.currentTime = newTime;
       }
+      // Update segments immediately on seek
       const activeSegments =
         data?.filter(
           (segment) => newTime >= segment.startTime && newTime < segment.endTime
