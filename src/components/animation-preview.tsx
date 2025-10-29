@@ -166,9 +166,12 @@ export function AnimationPreview({
                 setRenderMessage('Converting audio...');
                 await ffmpeg.exec(['-i', sourceFilename, '-c:a', 'aac', '-y', inputAudioFilename]);
             }
+             // Check if file exists by trying to read it
+            await ffmpeg.readFile(inputAudioFilename);
             audioExists = true;
         } catch (e) {
             console.warn("Could not extract or convert audio. The video will be silent.", e);
+            audioExists = false;
         }
         
 
@@ -284,9 +287,9 @@ export function AnimationPreview({
                     await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.rgba`);
                 } catch (e) {}
             }
-            try { await ffmpeg.deleteFile(sourceFilename); } catch (e) {}
-            try { await ffmpeg.deleteFile(inputAudioFilename); } catch (e) {}
-            try { await ffmpeg.deleteFile(finalOutputFilename); } catch (e) {}
+             try { if(sourceFilename) await ffmpeg.deleteFile(sourceFilename); } catch (e) {}
+             try { if(audioExists) await ffmpeg.deleteFile(inputAudioFilename); } catch (e) {}
+             try { if(finalOutputFilename) await ffmpeg.deleteFile(finalOutputFilename); } catch (e) {}
         } catch (e) {
             console.warn("Could not clean up some files in ffmpeg memory.");
         }
