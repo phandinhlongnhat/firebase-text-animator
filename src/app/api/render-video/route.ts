@@ -101,6 +101,10 @@ export async function POST(req: NextRequest) {
       .join(',');
 
     const ffmpegArgs = [
+      '-analyzeduration',
+      '10M',
+      '-probesize',
+      '10M',
       '-i',
       'pipe:0',
       '-vf',
