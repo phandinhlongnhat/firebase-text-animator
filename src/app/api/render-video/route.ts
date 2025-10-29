@@ -7,14 +7,32 @@ import { z } from 'zod';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 
-// --- FINAL, ROBUST FIX for 0xC0000005 CRASH ---
+/**
+ * ----------------------------------------------------------------------------- 
+ * IMPORTANT DEPLOYMENT NOTES FOR FFMPEG 
+ * ----------------------------------------------------------------------------- 
+ * 1. FFMPEG_PATH Environment Variable: 
+ *    You MUST set the FFMPEG_PATH environment variable on your server. 
+ *    This variable should point to the exact location of the ffmpeg executable.
+ * 
+ * 2. Correct FFMPEG Build: 
+ *    Ensure the ffmpeg build is compatible with your server's operating system 
+ *    (e.g., a Linux build for a Linux server). A mismatch (like a Windows build 
+ *    on Linux) will cause failures. 
+ * 
+ * 3. File Permissions: 
+ *    - The ffmpeg binary MUST have execute permissions (+x). 
+ *    - The font files in the `public/fonts` directory MUST have read 
+ *      permissions for the user running the application. 
+ * ----------------------------------------------------------------------------- 
+ */
 const ffmpegPath = process.env.FFMPEG_PATH;
-const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
 
 async function initializeFonts(): Promise<Map<string, string>> {
   const fontMap = new Map<string, string>();
   const fontsDir = path.join(process.cwd(), 'public', 'fonts');
   try {
+    // Ensure font files are readable on the server.
     const fontFiles = await fs.readdir(fontsDir);
     for (const file of fontFiles) {
       if (file.toLowerCase().endsWith('.ttf')) {
@@ -23,11 +41,11 @@ async function initializeFonts(): Promise<Map<string, string>> {
       }
     }
     if (fontMap.size === 0) {
-      console.warn(`No .ttf fonts found in ${fontsDir}.`);
+      console.warn(`No .ttf fonts found in ${fontsDir}. Ensure fonts are present and readable.`);
     }
     console.log('Initialized fonts:', Array.from(fontMap.keys()));
   } catch (error: any) {
-    console.error(`Error initializing fonts: Could not read directory ${fontsDir}.`, error.message);
+    console.error(`Error initializing fonts: Could not read directory ${fontsDir}. Check path and permissions.`, error.message);
   }
   return fontMap;
 }
@@ -73,14 +91,15 @@ export async function POST(req: NextRequest) {
     const { mediaUrl, segments } = validation.data;
 
     if (!ffmpegPath) {
-      return NextResponse.json({ error: 'FFMPEG path not configured.' }, { status: 500 });
+      console.error('FFMPEG_PATH environment variable not set.');
+      return NextResponse.json({ error: 'FFMPEG path not configured on the server.' }, { status: 500 });
     }
 
     const defaultFontPath =
       fontMap.get('roboto-bold') || (fontMap.size > 0 ? Array.from(fontMap.values())[0] : undefined);
     if (!defaultFontPath) {
       throw new Error(
-        'No fonts were successfully initialized. Check the `public/fonts` directory and ensure it contains .ttf files.'
+        'No fonts were successfully initialized. Check the `public/fonts` directory and ensure it contains .ttf files with read permissions.'
       );
     }
 
@@ -118,14 +137,7 @@ export async function POST(req: NextRequest) {
       'pipe:1',
     ];
 
-    const spawnOptions = {
-      env: {
-        ...process.env,
-        FONTCONFIG_FILE: fontConfigPath,
-      },
-    };
-
-    const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs, spawnOptions);
+    const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
     const passthrough = new PassThrough();
 
     inputStream.pipe(ffmpegProcess.stdin);
@@ -137,7 +149,7 @@ export async function POST(req: NextRequest) {
     });
 
     ffmpegProcess.on('error', (err) => {
-      console.error('Fatal: Failed to spawn ffmpeg process.', err);
+      console.error('Fatal: Failed to spawn ffmpeg process. Check FFMPEG_PATH and executable permissions.', err);
       passthrough.destroy(new Error(`Failed to spawn ffmpeg: ${err.message}`));
     });
 
