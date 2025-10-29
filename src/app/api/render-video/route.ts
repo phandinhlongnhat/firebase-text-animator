@@ -4,33 +4,60 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { Readable, PassThrough } from 'stream';
 import { z } from 'zod';
-import { spawn } from 'child_process'; // Import the native spawn function
-import { AnimationSegmentSchema } from '@/app/types';
+import { spawn } from 'child_process';
+import fs from 'fs/promises';
 
-// --- THE METHOD CHANGE: REMOVING FLUENT-FFMPEG ---
-// As requested, we are changing the method entirely.
-// We now bypass the `fluent-ffmpeg` library and use Node.js's native `spawn` function.
-// This gives us absolute control over the command-line arguments and eliminates the library
-// as a source of unpredictable behavior, especially with path and character escaping on Windows.
+// --- DYNAMIC FONT MANAGEMENT ---
+// This new approach allows for easy expansion of fonts.
+// 1. Fonts are now stored in `public/fonts`.
+// 2. We dynamically scan this directory to build a map of available fonts.
+// 3. The API now accepts a `fontFamily` parameter.
+// 4. The hardcoded Windows font logic is removed.
 
 const ffmpegPath = process.env.FFMPEG_PATH;
-
-// Minimal fonts.conf is still needed to prevent ffmpeg from crashing on startup.
 const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
 process.env.FONTCONFIG_FILE = fontConfigPath;
 
-const RequestBodySchema = z.object({
-  mediaUrl: z.string().url(),
-  segments: z.array(AnimationSegmentSchema),
+// --- FONT DISCOVERY (RUNS ONCE AT STARTUP) ---
+const fontsDir = path.join(process.cwd(), 'public', 'fonts');
+let fontMap: Map<string, string> = new Map();
+
+async function initializeFonts() {
+  try {
+    const fontFiles = await fs.readdir(fontsDir);
+    for (const file of fontFiles) {
+      if (file.toLowerCase().endsWith('.ttf')) {
+        const fontFamily = path.basename(file, '.ttf');
+        fontMap.set(fontFamily.toLowerCase(), path.join(fontsDir, file));
+      }
+    }
+    console.log('Initialized fonts:', Array.from(fontMap.keys()));
+  } catch (error) {
+    console.error('Error initializing fonts:', error);
+    // Fallback to a default font if scanning fails
+    const defaultFontPath = path.join(fontsDir, 'Roboto-Bold.ttf');
+    fontMap.set('roboto-bold', defaultFontPath);
+  }
+}
+
+// Initialize fonts when the server starts
+initializeFonts();
+
+const AnimationSegmentSchemaWithFont = z.object({
+  text: z.string(),
+  startTime: z.number(),
+  endTime: z.number(),
+  fontFamily: z.string().optional(), // New optional field
 });
 
-// These escaping functions remain critical.
+const RequestBodySchema = z.object({
+  mediaUrl: z.string().url(),
+  segments: z.array(AnimationSegmentSchemaWithFont),
+});
+
+// Escaping functions remain unchanged and essential
 function escapeFFmpegDrawtext(text: string): string {
-  return text
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, `'\\''`)
-    .replace(/:/g, '\\:')
-    .replace(/%/g, '\\%');
+  return text.replace(/\\/g, '\\\\').replace(/'/g, `'\\''`).replace(/:/g, '\\:').replace(/%/g, '\\%');
 }
 
 function escapeWindowsPathForFFmpeg(p: string): string {
@@ -50,10 +77,7 @@ export async function POST(req: NextRequest) {
     const { mediaUrl, segments } = validation.data;
 
     if (!ffmpegPath) {
-      return NextResponse.json(
-        { error: 'FFMPEG path not configured.' },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: 'FFMPEG path not configured.' }, { status: 500 });
     }
 
     const response = await fetch(mediaUrl);
@@ -62,24 +86,28 @@ export async function POST(req: NextRequest) {
     }
     const inputStream = Readable.fromWeb(response.body as any);
 
-    const fontPath = path.join(process.cwd(), 'fonts', 'Roboto-Bold.ttf');
-    const escapedFontPath = escapeWindowsPathForFFmpeg(fontPath);
+    const defaultFontPath = fontMap.get('roboto-bold') || Array.from(fontMap.values())[0];
+    if (!defaultFontPath) {
+      throw new Error('No fonts found in public/fonts directory.');
+    }
 
     const drawtextFilters = segments
       .map((segment) => {
+        const fontFamily = segment.fontFamily?.toLowerCase() || 'roboto-bold';
+        const fontPath = fontMap.get(fontFamily) || defaultFontPath;
+        const escapedFontPath = escapeWindowsPathForFFmpeg(fontPath);
         const escapedText = escapeFFmpegDrawtext(segment.text);
         return `drawtext=fontfile='${escapedFontPath}':text='${escapedText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${segment.startTime},${segment.endTime})'`;
       })
       .join(',');
 
-    // --- SPAWN IMPLEMENTATION ---
     const ffmpegArgs = [
-      '-i', 'pipe:0', // Input from stdin
+      '-i', 'pipe:0',
       '-vf', drawtextFilters,
       '-c:a', 'copy',
       '-movflags', 'frag_keyframe+empty_moov',
       '-f', 'mp4',
-      'pipe:1' // Output to stdout
+      'pipe:1',
     ];
 
     console.log(`Spawning ffmpeg with args: ${ffmpegArgs.join(' ')}`);
@@ -87,13 +115,9 @@ export async function POST(req: NextRequest) {
     const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
     const passthrough = new PassThrough();
 
-    // Pipe video data into ffmpeg's stdin
     inputStream.pipe(ffmpegProcess.stdin);
-
-    // Pipe ffmpeg's stdout to our response stream
     ffmpegProcess.stdout.pipe(passthrough);
 
-    // --- Robust Error Handling ---
     let stderr = '';
     ffmpegProcess.stderr.on('data', (data) => {
       stderr += data.toString();
@@ -107,19 +131,18 @@ export async function POST(req: NextRequest) {
     ffmpegProcess.on('close', (code) => {
       if (code === 0) {
         console.log('ffmpeg process finished successfully.');
-        passthrough.end(); // Properly close the stream
+        passthrough.end();
       } else {
         console.error(`ffmpeg process exited with code ${code}.`);
         console.error('ffmpeg stderr:\n', stderr);
         passthrough.destroy(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
       }
     });
-    
+
     const headers = new Headers();
     headers.set('Content-Type', 'video/mp4');
 
     return new NextResponse(passthrough as any, { headers });
-
   } catch (error: any) {
     console.error('Server-side render failed:', error);
     return NextResponse.json(
