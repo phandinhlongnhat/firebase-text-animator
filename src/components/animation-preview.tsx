@@ -157,10 +157,10 @@ export function AnimationPreview({
 
         if (isVideo) {
             setRenderMessage('Extracting audio from video...');
-            await ffmpeg.exec(['-i', sourceFilename, '-vn', '-acodec', 'copy', inputAudioFilename]);
+            await ffmpeg.exec(['-i', sourceFilename, '-vn', '-c:a', 'copy', inputAudioFilename]);
         } else {
             // If it's audio, we can just use it directly
-            await ffmpeg.exec(['-i', sourceFilename, '-acodec', 'aac', inputAudioFilename]);
+            await ffmpeg.exec(['-i', sourceFilename, '-c:a', 'aac', inputAudioFilename]);
         }
 
         setRenderMessage('Capturing animation frames (this might take a while)...');
@@ -204,7 +204,7 @@ export function AnimationPreview({
             setRenderProgress((i / numFrames) * 50); 
         }
 
-        const frameDataUrls = await Promise.all(frameDataUrls);
+        const frameDataUrls = await Promise.all(framePromises);
 
         if(mediaEl) mediaEl.currentTime = 0;
         setProgress(0);
