@@ -108,8 +108,8 @@ export function AnimationPreview({
       console.log(message);
     });
      ffmpeg.on('progress', ({ progress, time }) => {
-        setRenderProgress(50 + (progress * 50));
-        setRenderMessage(`Encoding video... ${Math.round(progress * 100)}%`);
+        setRenderProgress(75 + (progress * 25)); // Assume encoding is last 25%
+        setRenderMessage(`Encoding... ${Math.round(progress * 100)}%`);
     });
     setFfmpegLoaded(true);
     setRenderMessage('');
@@ -138,7 +138,10 @@ export function AnimationPreview({
 
     setIsRendering(true);
     setIsPlaying(false);
-    if(mediaRef.current) mediaRef.current.pause();
+    if(mediaRef.current) {
+      mediaRef.current.pause();
+      mediaRef.current.currentTime = 0;
+    }
 
     const ffmpeg = ffmpegRef.current;
     const animationNode = animationContainerRef.current!;
@@ -148,98 +151,107 @@ export function AnimationPreview({
     const cleanupFiles: string[] = [];
 
     try {
+        // --- STAGE 1: Prepare Media ---
+        setRenderProgress(0);
+        setRenderMessage('Preparing media...');
+        const sourceFileName = isVideo ? 'input.mp4' : 'input.mp3';
+        const inputAudioFilename = 'input_audio.aac';
+        cleanupFiles.push(sourceFileName, inputAudioFilename);
+
+        await ffmpeg.writeFile(sourceFileName, await fetchFile(mediaUrl));
+
+        let audioExists = false;
+        try {
+            // Extract audio, ignore errors if no audio stream
+            await ffmpeg.exec(['-i', sourceFileName, '-vn', '-c:a', 'copy', inputAudioFilename, '-y']);
+            // Check if file was created (size > 0)
+            const audioData = await ffmpeg.readFile(inputAudioFilename);
+            if (audioData.length > 0) {
+                audioExists = true;
+            }
+        } catch (e) {
+            console.log("Could not extract audio, probably no audio stream.");
+            audioExists = false;
+        }
+
+        // --- STAGE 2: Capture Frames ---
         setRenderMessage('Capturing animation frames...');
         const framePromises: Promise<string>[] = [];
 
-        // Hide original media during frame capture
-        if (mediaRef.current) mediaRef.current.style.opacity = '0';
+        const mediaEl = mediaRef.current;
         
         for (let i = 0; i < numFrames; i++) {
             const time = i / FRAME_RATE;
+
+            if (mediaEl) {
+              mediaEl.currentTime = time;
+              await sleep(40); // Increased sleep to allow video to seek and render
+            }
+
             const activeSegments = data.filter(segment => time >= segment.startTime && time < segment.endTime);
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
             
-            await sleep(10); // Give React time to re-render
+            await sleep(10); 
             
             const framePromise = htmlToImage.toPng(animationNode, {
-                quality: 1,
+                quality: 0.9, // Slightly reduce quality to save memory
                 pixelRatio: 1,
-                backgroundColor: 'transparent',
                 fetchRequestInit: {
                     mode: 'cors',
                     cache: 'no-cache'
                 }
             });
             framePromises.push(framePromise);
-            setRenderProgress(((i + 1) / numFrames) * 50); 
+            setRenderProgress(25 + ((i + 1) / numFrames) * 50); 
         }
 
         const frameDataUrls = await Promise.all(framePromises);
 
-        // Show original media again
-        if(mediaRef.current) mediaRef.current.style.opacity = '1';
-
-        setRenderMessage('Writing frames to FFmpeg...');
         for (let i = 0; i < frameDataUrls.length; i++) {
-            const dataUrl = frameDataUrls[i];
             const frameFilename = `frame-${String(i).padStart(5, '0')}.png`;
             cleanupFiles.push(frameFilename);
-            await ffmpeg.writeFile(frameFilename, await fetchFile(dataUrl));
+            await ffmpeg.writeFile(frameFilename, await fetchFile(frameDataUrls[i]));
         }
 
-        setRenderMessage('Encoding animation video...');
-        setRenderProgress(50);
-        const animationVideoFilename = 'animation.webm';
-        cleanupFiles.push(animationVideoFilename);
+        // --- STAGE 3: Encode Video & Mux Audio ---
+        setRenderProgress(75);
+        setRenderMessage('Encoding video...');
+        
+        const videoOnlyFilename = 'video_only.mp4';
+        const finalOutputFilename = 'output.mp4';
+        cleanupFiles.push(videoOnlyFilename, finalOutputFilename);
+
+        // Create video from image sequence
         await ffmpeg.exec([
             '-framerate', String(FRAME_RATE),
             '-i', 'frame-%05d.png',
-            '-c:v', 'libvpx-vp9', 
-            '-pix_fmt', 'yuva420p', // VP9 with alpha
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
             '-t', String(duration),
             '-y',
-            animationVideoFilename
+            videoOnlyFilename
         ]);
 
-        setRenderMessage('Fetching source media...');
-        const sourceFileName = isVideo ? 'input.mp4' : 'input.mp3';
-        cleanupFiles.push(sourceFileName);
-        await ffmpeg.writeFile(sourceFileName, await fetchFile(mediaUrl));
-
-        const outputFilename = 'output.mp4';
-        cleanupFiles.push(outputFilename);
-
-        setRenderMessage('Combining animation and source media...');
-        if(isVideo) {
-            // Robust overlay command
+        if (audioExists) {
+            setRenderMessage('Adding audio...');
+            // Mux video and audio
             await ffmpeg.exec([
-                '-i', sourceFileName,
-                '-i', animationVideoFilename,
-                '-filter_complex', '[0:v][1:v]overlay[v]', 
-                '-map', '[v]',
-                '-map', '0:a?', // Map audio from source if it exists
-                '-c:a', 'copy', 
-                '-c:v', 'libx264', // Widely supported codec
-                '-pix_fmt', 'yuv420p', // Standard pixel format for mp4
+                '-i', videoOnlyFilename,
+                '-i', inputAudioFilename,
+                '-c:v', 'copy', // copy video stream
+                '-c:a', 'copy', // copy audio stream
+                '-shortest',
                 '-y',
-                outputFilename
+                finalOutputFilename
             ]);
-        } else { // Is Audio
-            await ffmpeg.exec([
-                '-i', animationVideoFilename,
-                '-i', sourceFileName, // The audio file
-                '-c:v', 'libx264',
-                '-c:a', 'aac', // Re-encode audio to AAC for compatibility
-                '-pix_fmt', 'yuv420p',
-                '-shortest', // Finish encoding when the shortest input ends
-                '-y',
-                outputFilename
-            ]);
+        } else {
+            // If no audio, the video-only file is our final product
+            await ffmpeg.rename(videoOnlyFilename, finalOutputFilename);
         }
 
         setRenderMessage('Finalizing video...');
-        const outputData = await ffmpeg.readFile(outputFilename);
+        const outputData = await ffmpeg.readFile(finalOutputFilename);
         const dataBlob = new Blob([outputData], { type: 'video/mp4' });
         const url = URL.createObjectURL(dataBlob);
 
@@ -470,6 +482,8 @@ export function AnimationPreview({
       </CardHeader>
       <CardContent className="flex flex-1 flex-col justify-center space-y-4">
         <div
+          id="animation-container"
+          ref={animationContainerRef}
           className={cn(
             'relative w-full overflow-hidden rounded-lg flex items-center justify-center transition-all bg-black',
             aspectRatio === '16:9'
@@ -477,7 +491,6 @@ export function AnimationPreview({
               : 'aspect-[9/16] max-h-[70vh] mx-auto'
           )}
         >
-          <div ref={animationContainerRef} id="animation-container" className="absolute inset-0">
              {mediaUrl && (isVideo || isAudio) && (
               <>
                 {isVideo && (
@@ -564,7 +577,6 @@ export function AnimationPreview({
                 );
               })}
             </div>
-          </div>
           {renderStatus()}
         </div>
         {isRendering && (
