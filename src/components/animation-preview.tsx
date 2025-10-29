@@ -149,7 +149,6 @@ export function AnimationPreview({
         setRenderMessage('Capturing animation frames...');
         const framePromises: Promise<string>[] = [];
 
-        // Temporarily hide the video to capture only transparent text
         if(mediaRef.current) mediaRef.current.style.opacity = '0';
         
         for (let i = 0; i < numFrames; i++) {
@@ -158,21 +157,23 @@ export function AnimationPreview({
             setCurrentSegments(activeSegments);
             setKey(k => k + 1);
             
-            // Wait for the DOM to update with the new segments
             await sleep(10); 
             
             const framePromise = htmlToImage.toPng(animationNode, {
                 quality: 1,
                 pixelRatio: 1,
-                backgroundColor: 'transparent'
+                backgroundColor: 'transparent',
+                fetchRequestInit: {
+                    mode: 'cors',
+                    cache: 'no-cache'
+                }
             });
             framePromises.push(framePromise);
-            setRenderProgress((i / numFrames) * 50); // Capture frames is 50% of the work
+            setRenderProgress((i / numFrames) * 50); 
         }
 
         const frameDataUrls = await Promise.all(framePromises);
 
-        // Restore video visibility
         if(mediaRef.current) mediaRef.current.style.opacity = '1';
 
         setRenderMessage('Writing frames to FFmpeg...');
@@ -183,11 +184,11 @@ export function AnimationPreview({
         }
 
         setRenderMessage('Encoding animation video...');
-        setRenderProgress(50); // Reset progress for ffmpeg part
+        setRenderProgress(50); 
         await ffmpeg.exec([
             '-framerate', String(FRAME_RATE),
             '-i', 'frame-%05d.png',
-            '-c:v', 'libvpx-vp9', // Codec with alpha channel support
+            '-c:v', 'libvpx-vp9', 
             '-pix_fmt', 'yuva420p',
             '-t', String(duration),
             '-y',
@@ -204,18 +205,18 @@ export function AnimationPreview({
             await ffmpeg.exec([
                 '-i', 'input.mp4',
                 '-i', 'animation.webm',
-                '-filter_complex', '[0:v][1:v]overlay', // Overlay animation on top
-                '-c:a', 'copy', // Copy original audio
+                '-filter_complex', '[0:v][1:v]overlay', 
+                '-c:a', 'copy', 
                 '-y',
                 'output.mp4'
             ]);
-        } else { // isAudio
+        } else { 
             await ffmpeg.exec([
                 '-i', 'animation.webm',
                 '-i', 'input.mp3',
                 '-c:v', 'libx264',
                 '-c:a', 'aac',
-                '-shortest', // Finish when the shortest stream (audio) ends
+                '-shortest', 
                 '-y',
                 'output.mp4'
             ]);
@@ -251,10 +252,11 @@ export function AnimationPreview({
         setRenderProgress(0);
         setRenderMessage('');
         
-        // Cleanup ffmpeg files
         try {
             for (let i = 0; i < numFrames; i++) {
-                await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
+                if (await ffmpeg.pathExists(`frame-${String(i).padStart(5, '0')}.png`)) {
+                    await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
+                }
             }
              if (await ffmpeg.pathExists('animation.webm')) await ffmpeg.deleteFile('animation.webm');
              if (await ffmpeg.pathExists('input.mp4')) await ffmpeg.deleteFile('input.mp4');
@@ -283,7 +285,7 @@ export function AnimationPreview({
         setProgress(100);
       }
     } else {
-      const elapsed = (progress / 100) * totalDuration + 16 / 1000; // rough 60fps
+      const elapsed = (progress / 100) * totalDuration + 16 / 1000; 
       currentTime = elapsed;
       if (currentTime >= totalDuration) {
         setIsPlaying(false);
