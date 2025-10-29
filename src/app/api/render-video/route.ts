@@ -1,1 +1,162 @@
-\'use server\';\n\nimport { NextRequest, NextResponse } from \'next/server\';\nimport path from \'path\';\nimport { Readable, PassThrough } from \'stream\';\nimport { z } from \'zod\';\nimport { spawn } from \'child_process\';\nimport fs from \'fs/promises\';\n\n// --- FINAL, ROBUST FIX for 0xC0000005 CRASH ---\n// THE PROBLEM: The `3221225477` (0xC0000005) crash is an Access Violation, happening instantly on\n// ffmpeg startup. This is caused by the `ffmpeg` child process NOT inheriting the `FONTCONFIG_FILE`\n// environment variable set at the module level in a Next.js serverless environment.\n//\n// THE SOLUTION: We will STOP setting the environment variable for the parent process. Instead, we will\n// explicitly pass the required environment variables directly to the `spawn` function. This is the\n// canonical, guaranteed way to configure a child process\'s environment.\n\nconst ffmpegPath = process.env.FFMPEG_PATH;\nconst fontConfigPath = path.join(process.cwd(), \'src\', \'app\', \'api\', \'render-video\', \'fonts.conf\');\n\nasync function initializeFonts(): Promise<Map<string, string>> {\n  const fontMap = new Map<string, string>();\n  const fontsDir = path.join(process.cwd(), \'public\', \'fonts\');\n  try {\n    const fontFiles = await fs.readdir(fontsDir);\n    for (const file of fontFiles) {\n      if (file.toLowerCase().endsWith(\'.ttf\')) {\n        const fontFamily = path.basename(file, \'.ttf\');\n        fontMap.set(fontFamily.toLowerCase(), path.join(fontsDir, file));\n      }\n    }\n    if (fontMap.size === 0) {\n        console.warn(`No .ttf fonts found in ${fontsDir}.`);\n    }\n    console.log(\'Initialized fonts:\', Array.from(fontMap.keys()));\n  } catch (error: any) {\n    console.error(`Error initializing fonts: Could not read directory ${fontsDir}.\`, error.message);\n  }\n  return fontMap;\n}\n\nconst fontMapPromise = initializeFonts();\n\nconst AnimationSegmentSchemaWithFont = z.object({\n  text: z.string(),\n  startTime: z.number(),\n  endTime: z.number(),\n  fontFamily: z.string().optional(),\n});\n\nconst RequestBodySchema = z.object({\n  mediaUrl: z.string().url(),\n  segments: z.array(AnimationSegmentSchemaWithFont),\n});\n\nfunction escapeFFmpegDrawtext(text: string): string {\n  return text.replace(/\\\\/g, \'\\\\\\\\\').replace(/\'/g, `\'\\\\\'\'`).replace(/:/g, \'\\\\:\').replace(/%/g, \'\\\\%\');\n}\n\nfunction escapeWindowsPathForFFmpeg(p: string): string {\n  return p.replace(/\\\\/g, \'/\').replace(/:/g, \'\\\\:\');\n}\n\nexport async function POST(req: NextRequest) {\n  try {\n    const fontMap = await fontMapPromise;\n\n    const body = await req.json();\n    const validation = RequestBodySchema.safeParse(body);\n    if (!validation.success) {\n      return NextResponse.json(\n        { error: \'Invalid request body\', details: validation.error.format() },\n        { status: 400 }\n      );\n    }\n    const { mediaUrl, segments } = validation.data;\n\n    if (!ffmpegPath) {\n      return NextResponse.json({ error: \'FFMPEG path not configured.\' }, { status: 500 });\n    }\n    \n    const defaultFontPath = fontMap.get(\'roboto-bold\') || (fontMap.size > 0 ? Array.from(fontMap.values())[0] : undefined);\n    if (!defaultFontPath) {\n      throw new Error(\'No fonts were successfully initialized. Check the `public/fonts` directory and ensure it contains .ttf files. See server startup logs for details.\');\n    }\n\n    const response = await fetch(mediaUrl);\n    if (!response.ok || !response.body) {\n      throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);\n    }\n    const inputStream = Readable.fromWeb(response.body as any);\n\n    const drawtextFilters = segments\n      .map((segment) => {\n        const fontFamily = segment.fontFamily?.toLowerCase() || \'roboto-bold\';\n        const fontPath = fontMap.get(fontFamily) || defaultFontPath;\n        const escapedFontPath = escapeWindowsPathForFFmpeg(fontPath);\n        const escapedText = escapeFFmpegDrawtext(segment.text);\n        return `drawtext=fontfile=\'${escapedFontPath}\':text=\'${escapedText}\':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable=\'between(t,${segment.startTime},${segment.endTime})\'`;\n      })\n      .join(\',\');\n\n    const ffmpegArgs = [\n      \'-i\', \'pipe:0\',\n      \'-vf\', drawtextFilters,\n      \'-c:a\', \'copy\',\n      \'-movflags\', \'frag_keyframe+empty_moov\',\n      \'-f\', \'mp4\',\n      \'pipe:1\',\n    ];\n    \n    // **THE FIX**: Explicitly provide environment variables to the child process.\n    const spawnOptions = {\n        env: {\n            ...process.env, // Inherit parent environment\n            FONTCONFIG_FILE: fontConfigPath, // And force our required variable\n        }\n    };\n\n    const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs, spawnOptions);\n    const passthrough = new PassThrough();\n\n    inputStream.pipe(ffmpegProcess.stdin);\n    ffmpegProcess.stdout.pipe(passthrough);\n\n    let stderr = \'\';\n    ffmpegProcess.stderr.on(\'data\', (data) => {\n      stderr += data.toString();\n    });\n\n    ffmpegProcess.on(\'error\', (err) => {\n      console.error(\'Fatal: Failed to spawn ffmpeg process.\', err);\n      passthrough.destroy(new Error(`Failed to spawn ffmpeg: ${err.message}`));\n    });\n\n    ffmpegProcess.on(\'close\', (code) => {\n      if (code === 0) {\n        console.log(\'ffmpeg process finished successfully.\');\n        passthrough.end();\n      } else {\n        console.error(`ffmpeg process exited with code ${code}.`);\n        console.error(\'ffmpeg stderr:\\n\', stderr);\n        passthrough.destroy(new Error(`ffmpeg exited with code ${code}: ${stderr}`));\n      }\n    });\n\n    const headers = new Headers();\n    headers.set(\'Content-Type\', \'video/mp4\');\n\n    return new NextResponse(passthrough as any, { headers });\n  } catch (error: any) {\n    console.error(\'Server-side render failed:\', error);\n    return NextResponse.json(\n      { error: error.message || \'An unknown error occurred.\' },\n      { status: 500 }\n    );\n  }\n}\n
+'use server';
+
+import { NextRequest, NextResponse } from 'next/server';
+import path from 'path';
+import { Readable, PassThrough } from 'stream';
+import { z } from 'zod';
+import { spawn } from 'child_process';
+import fs from 'fs/promises';
+
+// --- FINAL, ROBUST FIX for 0xC0000005 CRASH ---
+const ffmpegPath = process.env.FFMPEG_PATH;
+const fontConfigPath = path.join(process.cwd(), 'src', 'app', 'api', 'render-video', 'fonts.conf');
+
+async function initializeFonts(): Promise<Map<string, string>> {
+  const fontMap = new Map<string, string>();
+  const fontsDir = path.join(process.cwd(), 'public', 'fonts');
+  try {
+    const fontFiles = await fs.readdir(fontsDir);
+    for (const file of fontFiles) {
+      if (file.toLowerCase().endsWith('.ttf')) {
+        const fontFamily = path.basename(file, '.ttf');
+        fontMap.set(fontFamily.toLowerCase(), path.join(fontsDir, file));
+      }
+    }
+    if (fontMap.size === 0) {
+      console.warn(`No .ttf fonts found in ${fontsDir}.`);
+    }
+    console.log('Initialized fonts:', Array.from(fontMap.keys()));
+  } catch (error: any) {
+    console.error(`Error initializing fonts: Could not read directory ${fontsDir}.`, error.message);
+  }
+  return fontMap;
+}
+
+const fontMapPromise = initializeFonts();
+
+const AnimationSegmentSchemaWithFont = z.object({
+  text: z.string(),
+  startTime: z.number(),
+  endTime: z.number(),
+  fontFamily: z.string().optional(),
+});
+
+const RequestBodySchema = z.object({
+  mediaUrl: z.string().url(),
+  segments: z.array(AnimationSegmentSchemaWithFont),
+});
+
+function escapeFFmpegDrawtext(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, `'\\''`)
+    .replace(/:/g, '\\:')
+    .replace(/%/g, '\\%');
+}
+
+function escapeWindowsPathForFFmpeg(p: string): string {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const fontMap = await fontMapPromise;
+
+    const body = await req.json();
+    const validation = RequestBodySchema.safeParse(body);
+    if (!validation.success) {
+      return NextResponse.json(
+        { error: 'Invalid request body', details: validation.error.format() },
+        { status: 400 }
+      );
+    }
+    const { mediaUrl, segments } = validation.data;
+
+    if (!ffmpegPath) {
+      return NextResponse.json({ error: 'FFMPEG path not configured.' }, { status: 500 });
+    }
+
+    const defaultFontPath =
+      fontMap.get('roboto-bold') || (fontMap.size > 0 ? Array.from(fontMap.values())[0] : undefined);
+    if (!defaultFontPath) {
+      throw new Error(
+        'No fonts were successfully initialized. Check the `public/fonts` directory and ensure it contains .ttf files.'
+      );
+    }
+
+    const response = await fetch(mediaUrl);
+    if (!response.ok || !response.body) {
+      throw new Error(`Failed to fetch media from URL: ${mediaUrl}`);
+    }
+    const inputStream = Readable.fromWeb(response.body as any);
+
+    const drawtextFilters = segments
+      .map((segment) => {
+        const fontFamily = segment.fontFamily?.toLowerCase() || 'roboto-bold';
+        const fontPath = fontMap.get(fontFamily) || defaultFontPath;
+        const escapedFontPath = escapeWindowsPathForFFmpeg(fontPath);
+        const escapedText = escapeFFmpegDrawtext(segment.text);
+        return `drawtext=fontfile='${escapedFontPath}':text='${escapedText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,${segment.startTime},${segment.endTime})'`;
+      })
+      .join(',');
+
+    const ffmpegArgs = [
+      '-i',
+      'pipe:0',
+      '-vf',
+      drawtextFilters,
+      '-c:a',
+      'copy',
+      '-movflags',
+      'frag_keyframe+empty_moov',
+      '-f',
+      'mp4',
+      'pipe:1',
+    ];
+
+    const spawnOptions = {
+      env: {
+        ...process.env,
+        FONTCONFIG_FILE: fontConfigPath,
+      },
+    };
+
+    const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs, spawnOptions);
+    const passthrough = new PassThrough();
+
+    inputStream.pipe(ffmpegProcess.stdin);
+    ffmpegProcess.stdout.pipe(passthrough);
+
+    let stderr = '';
+    ffmpegProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error('Fatal: Failed to spawn ffmpeg process.', err);
+      passthrough.destroy(new Error(`Failed to spawn ffmpeg: ${err.message}`));
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      if (code === 0) {
+        console.log('ffmpeg process finished successfully.');
+        passthrough.end();
+      } else {
+        console.error(`ffmpeg process exited with code ${code}.`);
+        console.error('ffmpeg stderr:\n', stderr);
+        passthrough.destroy(new Error(`ffmpeg exited with code ${code}: ${stderr}`));
+      }
+    });
+
+    const headers = new Headers();
+    headers.set('Content-Type', 'video/mp4');
+
+    return new NextResponse(passthrough as any, { headers });
+  } catch (error: any) {
+    console.error('Server-side render failed:', error);
+    return NextResponse.json(
+      { error: error.message || 'An unknown error occurred.' },
+      { status: 500 }
+    );
+  }
+}
