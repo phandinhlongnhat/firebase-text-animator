@@ -130,9 +130,9 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
             .videoCodec('libvpx-vp9')
             .addOption('-pix_fmt', 'yuva420p') // for transparency
             .duration(duration)
+            .cwd(tempDir) // Set CWD before event handlers and save
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error creating animation: ${err.message}`)))
-            .cwd(tempDir) // Set Current Working Directory
             .save(animationFilename);
     });
 
@@ -143,12 +143,12 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
         if (isVideo) {
             command
                 .input(animationFilename)
-                .complexFilter('[0:v][1:v]overlay[v]')
+                .complexFilter('[0:v]format=yuv420p[bg];[1:v][bg]overlay[v]')
                 .map('[v]')
                 .map('[0:a]?') // use audio from original video if it exists
                 .videoCodec('libx264')
                 .addOption('-pix_fmt', 'yuv420p') // standard mp4 pixel format
-                .outputOptions('-preset', 'fast')
+                .outputOptions('-preset', 'fast');
         } else { // Audio source
              command
                 .input(animationFilename)
@@ -161,9 +161,9 @@ export async function renderVideoOnServer(formData: FormData): Promise<{ videoUr
         }
 
         command
+            .cwd(tempDir) // Set CWD before event handlers and save
             .on('end', () => resolve())
             .on('error', (err) => reject(new Error(`FFmpeg error combining media: ${err.message}`)))
-            .cwd(tempDir) // Set Current Working Directory
             .save(outputFilename);
     });
 
