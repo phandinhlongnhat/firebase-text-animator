@@ -167,7 +167,7 @@ export function AnimationPreview({
                 backgroundColor: 'transparent'
             });
             framePromises.push(framePromise);
-            setRenderProgress((i / numFrames) * 100);
+            setRenderProgress((i / numFrames) * 50); // Capture frames is 50% of the work
         }
 
         const frameDataUrls = await Promise.all(framePromises);
@@ -183,6 +183,7 @@ export function AnimationPreview({
         }
 
         setRenderMessage('Encoding animation video...');
+        setRenderProgress(50); // Reset progress for ffmpeg part
         await ffmpeg.exec([
             '-framerate', String(FRAME_RATE),
             '-i', 'frame-%05d.png',
@@ -255,10 +256,10 @@ export function AnimationPreview({
             for (let i = 0; i < numFrames; i++) {
                 await ffmpeg.deleteFile(`frame-${String(i).padStart(5, '0')}.png`);
             }
-            await ffmpeg.deleteFile('animation.webm');
-            await ffmpeg.deleteFile('input.mp4');
-            await ffmpeg.deleteFile('input.mp3');
-            await ffmpeg.deleteFile('output.mp4');
+             if (await ffmpeg.pathExists('animation.webm')) await ffmpeg.deleteFile('animation.webm');
+             if (await ffmpeg.pathExists('input.mp4')) await ffmpeg.deleteFile('input.mp4');
+             if (await ffmpeg.pathExists('input.mp3')) await ffmpeg.deleteFile('input.mp3');
+             if (await ffmpeg.pathExists('output.mp4')) await ffmpeg.deleteFile('output.mp4');
         } catch (e) {
             console.warn("Could not clean up some files in ffmpeg memory.");
         }

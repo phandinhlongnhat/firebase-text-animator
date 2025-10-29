@@ -1,8 +1,6 @@
 'use server';
 
-import { analyzeTextInputForEmotion } from '@/ai/flows/analyze-text-input-for-emotion';
 import type { AnimationSegment } from './types';
-
 
 function parseTimeToSeconds(time: string): number {
   const parts = time.replace(',', '.').split(':');
@@ -70,26 +68,22 @@ export async function generateAnimationFromSrtAction(
       };
     }
     
-    const fullText = srtSegments.map(s => s.text).join('\n');
-    const analysis = await analyzeTextInputForEmotion({ text: fullText });
-
-    // A simple mapping strategy: find the original segment by exact text match
-    const enrichedSegments = srtSegments.map(srtSeg => {
-      const analyzedSeg = analysis.find(a => a.text.includes(srtSeg.text));
+    // Simplified: No AI analysis, just assign a default animation
+    const enrichedSegments: AnimationSegment[] = srtSegments.map(srtSeg => {
       return {
         ...srtSeg,
-        emotion: analyzedSeg?.emotion || 'neutral',
-        animations: analyzedSeg?.animations || ['fadeIn'],
+        emotion: 'neutral', // Default emotion
+        animations: ['fadeIn'], // Default animation
       };
     });
 
     return { data: enrichedSegments, error: null };
   } catch (e: any) {
     console.error(e);
-    const errorMessage = e.message || "An unknown error occurred with the AI model.";
+    const errorMessage = e.message || "An unknown error occurred.";
     return {
       data: null,
-      error: `Failed to analyze text with AI. ${errorMessage}`,
+      error: `Failed to process SRT. ${errorMessage}`,
     };
   }
 }
